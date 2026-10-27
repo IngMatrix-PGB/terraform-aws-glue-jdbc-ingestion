@@ -1,75 +1,259 @@
-# Matrix Datalake JDBC Glue (Terraform)
+# terraform-aws-glue-jdbc-ingestion
 
-A small, production-minded Terraform module to deploy **AWS Glue JDBC ingestion building blocks**:
+Terraform module that ingests a JDBC source into S3 as Parquet with AWS Glue:
+one job per source, with its connection, least-privilege role, schedule,
+optional crawler and failure alerts. It ships a tested PostgreSQL extractor
+for Glue Python shell, so a database can be landed with a dozen lines of HCL.
 
-- S3 script upload (optional)
-- Glue Connection (JDBC)
-- Glue Job (Glue ETL)
-- Glue Crawler (optional)
-- Glue Trigger (optional)
+```hcl
+module "orders_db" {
+  # Pin a release tag; the module is not on the public Registry yet.
+  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion?ref=v0.2.0"
 
-This repo is **safe to share publicly**: examples use **fictitious** JDBC endpoints and credentials.
+  name           = "orders-db-prd"
+  scripts_bucket = "my-glue-scripts"
+  output_s3_path = "s3://my-datalake/raw/orders-db/"
 
-## Why this exists
+  jdbc_url   = "jdbc:postgresql://orders.example.internal:5432/orders"
+  secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:orders/reader-AbCdEf"
 
-When building a data lake, teams repeatedly wire the same pieces (Connection + Job + optional Crawler/Trigger).  
-This module packages that pattern as a clean, reusable interface.
+  subnet_id          = "subnet-0123456789abcdef0"
+  security_group_ids = ["sg-0123456789abcdef0"]
 
-## Module
+  extract_discover = true                 # every table of public
+  python_modules   = ["pg8000==1.31.5"]   # or extra_py_files without internet
 
-Path: `modules/matrix-datalake-jdbc-glue`
-
-### Inputs (high level)
-
-- `scripts_bucket`, `scripts_prefix`, `script_local_path`
-- `connection_properties` (JDBC URL, username, password)
-- `iam_role_arn` (Glue role)
-- Optional crawler/trigger toggles
-
-## Example
-
-- **`examples/portfolio`** — Ejemplo reproducible: Secrets Manager → connection_properties, dos jobs (PostgreSQL y MySQL), scripts en `scripts/`. Config en `terraform.tfvars` y `backend.hcl`.  
-  Ver [examples/portfolio/README.md](examples/portfolio/README.md).
-
-## Arquitectura IaC
-
-Flujo Terraform → Glue (ejemplo portfolio):
-
-```mermaid
-flowchart LR
-  subgraph Terraform["Terraform (examples/portfolio)"]
-    SM[("Secrets Manager\n(data)")]
-    SM --> LV[locals: jsondecode\nusername, password]
-    LV --> CP[connection_properties\nJDBC_URL, USERNAME, PASSWORD]
-    CP --> MOD[module matrix-datalake-jdbc-glue]
-    MOD --> GC[Glue Connection]
-    MOD --> GJ[Glue Job]
-    MOD --> GX[Glue Crawler]
-    MOD --> GT[Glue Trigger]
-    MOD --> S3UP[S3 script upload]
-  end
-
-  subgraph IAM
-    ROLE[IAM Role Glue]
-    ROLE --> POL1[S3, Glue Catalog, EC2]
-    ROLE --> POL2[Secrets Manager GetSecretValue]
-  end
-
-  GJ --> ROLE
-  GC --> DB[(Source DB\nPostgreSQL / MySQL)]
-  GJ --> S3[("S3\nraw/ scripts/ temp/")]
-  GX --> S3
+  create_trigger   = true
+  trigger_schedule = "cron(0/30 * * * ? *)"
+}
 ```
 
-| Componente | Origen | Función |
-|------------|--------|---------|
-| **Secrets Manager** | Existente en AWS | Secret JSON `username`/`password`; Terraform lo lee con `data "aws_secretsmanager_secret_version"`. |
-| **locals** | `locals.tf` | `jdbc_credentials = jsondecode(secret_string)`; construye `connection_props_*` con USERNAME/PASSWORD. |
-| **module matrix-datalake-jdbc-glue** | `modules/` | Crea Glue Connection, Job, Crawler opcional, Trigger opcional; sube script a S3. |
-| **IAM Role** | `main.tf` | Rol para Glue con permisos S3, Glue Catalog, EC2/VPC y Secrets Manager. |
+Examples: [`examples/minimal`](examples/minimal) (one database) and
+[`examples/complete`](examples/complete) (several sources with `for_each`,
+chained crawlers, alerts and a Spark job with a custom script).
 
-## Notes
+## What it creates
 
-- JDBC drivers may be needed (e.g., MySQL/SQL Server). Add them via `--extra-jars` or a Glue job parameter / library.
-- For real deployments, store credentials in AWS Secrets Manager and inject them into `connection_properties` via data sources.
+| Resource | When |
+|---|---|
+| `aws_glue_job` (Python shell or Spark) | always |
+| `aws_s3_object` with the script | unless `script_s3_key` points at an existing one |
+| `aws_glue_connection` (JDBC, network wiring only) | `create_connection` (default) |
+| `aws_iam_role` + inline policy scoped to this job | `create_iam_role` (default) |
+| `aws_glue_trigger` (schedule) | `create_trigger` |
+| `aws_glue_crawler` + conditional triggers | `create_crawler`, `chain_crawler` |
+| EventBridge rules to SNS for failures | `alerts_sns_topic_arn` |
 
+## Design decisions
+
+These come from running this pattern in production; each one fixed a real
+failure or cost problem.
+
+- **Credentials never leave Secrets Manager.** The job gets `--secret_id` and
+  reads the secret at runtime. Job arguments are readable by anyone with
+  `glue:GetJob`, and `USERNAME`/`PASSWORD` connection properties end up in
+  plain text in Terraform state, so the module rejects them. The connection
+  references the secret through `SECRET_ID` and only provides the VPC wiring.
+- **Python shell by default.** A table dump does not need Spark: a 0.0625 DPU
+  Python shell job costs about a tenth of the smallest Spark job. Use
+  `job_type = "glueetl"` for real transformations. Switching types replaces the
+  job (an in-place update fails in the Glue API).
+- **One writer per prefix.** The extractor deletes a table's folder and then
+  writes new parts, so two concurrent runs would duplicate rows.
+  `max_concurrent_runs` defaults to 1; callers such as Step Functions should
+  retry `ConcurrentRunsExceeded`.
+- **Explicit timeout and failure alerts.** `job_timeout` defaults to 60
+  minutes instead of Glue's 48 hours, so a stuck run ends in `TIMEOUT`, which
+  the EventBridge rule reports with `FAILED` and `ERROR`.
+- **Data and schema refresh separately.** The job overwrites the Parquet files
+  and Athena reads them right away; the crawler is only needed when the schema
+  changes. A crawler run bills at least 10 minutes, so run it weekly
+  (`crawler_schedule`) or chain it to the job (`chain_crawler`), not every 30
+  minutes. Chained crawlers only fire for runs started by Glue triggers.
+- **Crawler that does not surprise you.** `MergeNewColumns` keeps table
+  properties set outside the crawler, `delete_behavior = LOG` never drops
+  tables, and `crawler_table_level` stops Glue from collapsing a prefix that
+  has a single table into one table with `partition_0`.
+- **Least privilege.** The role can read its script and the secret, write only
+  its output prefix and update only its catalog database. Delete permissions on
+  the catalog are granted only when the schema change policy can delete.
+
+## Bundled PostgreSQL extractor
+
+[`scripts/pg_extractor.py`](scripts/pg_extractor.py) is used when neither
+`script_local_path` nor `script_s3_key` is set.
+
+- **Modes:** `extract_tables = ["public.orders", "billing.invoices"]`, or
+  `extract_discover = true` for every table of `extract_schema` (migration
+  bookkeeping tables such as `schema_migrations` are always skipped).
+- **Layout:** `<output_s3_path>/<table>/part-NNNNN-<id>.snappy.parquet`;
+  tables outside `public` become `<schema>_<table>`. An empty table still
+  gets one empty part so the crawler sees its columns.
+- **Memory:** a server-side cursor reads `--fetchsize` rows (default 50,000)
+  at a time, one Parquet part per chunk.
+- **Safety:** read-only session, TLS always (`require`, or `verify-full`
+  with `--ssl_root_cert`) and no plaintext fallback. With a secret that has
+  no password, the extractor uses RDS IAM authentication
+  (`rds_iam_auth_resource_arns`).
+- **Failures:** a failing table does not stop the rest; the run fails at the
+  end and lists them. In discover mode, tables without `SELECT` are skipped
+  and reported, and their existing data is left alone.
+- **Types:** integers, floats, booleans, dates, timestamps (UTC for
+  `timestamptz`), `bytea` and `numeric(p,s)` keep their types. Unconstrained
+  `numeric`, arrays, `json`/`jsonb` and anything else become strings
+  (JSON-encoded where it applies), because a fixed decimal scale would round
+  silently.
+- **Driver:** pg8000 (pure Python, SCRAM-SHA-256). Install it with
+  `python_modules = ["pg8000==1.31.5"]` (needs a NAT) or upload the wheels and
+  pass them in `extra_py_files`:
+  `pip download pg8000==1.31.5 --only-binary=:all: --python-version 3.9 -d libs/`.
+
+Known limit: while a table is rewritten, readers can see it empty or partial
+for a few seconds (see [docs/TECH-DEBT.md](docs/TECH-DEBT.md)).
+
+## Network prerequisites
+
+With `create_connection = true` the job runs in your subnet, which needs:
+
+- a route to the database;
+- an S3 gateway endpoint (script, output and libraries);
+- a Secrets Manager interface endpoint or a NAT;
+- a NAT if you use `python_modules`;
+- a security group with a self-referencing all-TCP inbound rule (a Glue requirement).
+
+For sources reachable without a VPC set `create_connection = false`. To keep
+the connection but run the job outside the VPC (for example a job that calls
+Athena), set `attach_connection_to_job = false`.
+
+## Development
+
+```bash
+pre-commit install                       # fmt, validate, tflint, docs, ruff
+terraform test                           # plan-only tests, mocked provider
+docker run -d --name pgx -e POSTGRES_PASSWORD=admin -p 55432:5432 postgres:16 \
+  -c ssl=on -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem \
+  -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+pip install -r tests/python/requirements.txt
+PG_PORT=55432 AWS_DEFAULT_REGION=us-east-1 pytest tests/python
+```
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same
+checks plus Checkov. Upgrading from 0.1.x: see [CHANGELOG.md](CHANGELOG.md).
+
+<!-- BEGIN_TF_DOCS -->
+## Requirements
+
+| Name | Version |
+|------|---------|
+| terraform | >= 1.9.0 |
+| aws | >= 6.0, < 7.0 |
+
+## Providers
+
+| Name | Version |
+|------|---------|
+| aws | >= 6.0, < 7.0 |
+| terraform | n/a |
+
+## Resources
+
+| Name | Type |
+|------|------|
+| [aws_cloudwatch_event_rule.crawler_failed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
+| [aws_cloudwatch_event_rule.job_failed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
+| [aws_cloudwatch_event_target.crawler_failed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_target) | resource |
+| [aws_cloudwatch_event_target.job_failed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_target) | resource |
+| [aws_glue_connection.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_connection) | resource |
+| [aws_glue_crawler.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_crawler) | resource |
+| [aws_glue_job.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_job) | resource |
+| [aws_glue_trigger.crawler_on_job_failure](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_trigger) | resource |
+| [aws_glue_trigger.crawler_on_job_success](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_trigger) | resource |
+| [aws_glue_trigger.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_trigger) | resource |
+| [aws_iam_role.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
+| [aws_iam_role_policy.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
+| [aws_s3_object.script](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_object) | resource |
+| [terraform_data.job_command](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
+| [aws_caller_identity.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/caller_identity) | data source |
+| [aws_iam_policy_document.assume](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_partition.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/partition) | data source |
+| [aws_region.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/region) | data source |
+| [aws_subnet.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/subnet) | data source |
+
+## Inputs
+
+| Name | Description | Type | Default | Required |
+|------|-------------|------|---------|:--------:|
+| jdbc\_url | JDBC URL of the source, e.g. `jdbc:postgresql://host:5432/db`. Used by the Glue connection and passed to the job as `--jdbc_url`. | `string` | n/a | yes |
+| name | Base name for the job and its connection, crawler, triggers, role and alert rules. Include the environment (e.g. `orders-db-prd`) so two environments in one account never collide. | `string` | n/a | yes |
+| output\_s3\_path | S3 prefix the job writes to (`s3://bucket/prefix/`). Passed as `--output_path_base`; scopes the role's write access and is the crawler's default target. | `string` | n/a | yes |
+| scripts\_bucket | S3 bucket that holds the job script. | `string` | n/a | yes |
+| secret\_arn | Secrets Manager secret ARN with the source credentials (`username`/`password`, or `username` alone for RDS IAM auth). The job resolves it at runtime from `--secret_id`; credentials never reach job arguments, connection properties or Terraform state. | `string` | n/a | yes |
+| alerts\_sns\_topic\_arn | SNS topic for EventBridge alerts when the job ends in FAILED/TIMEOUT/ERROR or the crawler fails. Its policy must allow `events.amazonaws.com` to publish. Null creates no alerts. | `string` | `null` | no |
+| attach\_connection\_to\_job | Attach the connection to the job. Set false to keep the connection but run the job outside the VPC (e.g. Athena runners). | `bool` | `true` | no |
+| availability\_zone | Availability zone of `subnet_id`. Looked up from the subnet when null. | `string` | `null` | no |
+| chain\_crawler | Start the crawler from a conditional trigger when the job SUCCEEDS, instead of a cron. Conditional triggers fire only for runs started by Glue triggers, not for StartJobRun from Step Functions or the CLI. | `bool` | `false` | no |
+| connection\_name | Glue connection name. Defaults to `name`. | `string` | `null` | no |
+| connection\_properties | Extra connection properties merged over `JDBC_CONNECTION_URL` and `SECRET_ID` (e.g. `JDBC_ENFORCE_SSL`). USERNAME and PASSWORD are rejected: they would be stored in plain text in state and returned by `glue:GetConnection`. | `map(string)` | `{}` | no |
+| crawler\_database\_name | Glue Catalog database for the crawler (must exist). Required when `create_crawler` is true. | `string` | `null` | no |
+| crawler\_exclusions | Glob patterns the crawler skips. | `list(string)` | ```[ "**/_SUCCESS", "**/_temporary/**" ]``` | no |
+| crawler\_name | Crawler name. Defaults to `name`. | `string` | `null` | no |
+| crawler\_on\_job\_failure | With `chain_crawler`, also start the crawler when the job FAILS (for jobs that write independent tables and fail if any one fails). Glue rejects two conditions on the same job in one predicate, so this is a second trigger. | `bool` | `false` | no |
+| crawler\_s3\_target\_path | Crawler target. Defaults to `output_s3_path`. | `string` | `null` | no |
+| crawler\_schedule | Own cron for the crawler. Weekly is usually enough (a crawler run bills at least 10 minutes). Ignored when `chain_crawler` is true. | `string` | `null` | no |
+| crawler\_schema\_change\_delete\_behavior | LOG (default: never drop tables that disappear), DEPRECATE\_IN\_DATABASE or DELETE\_FROM\_DATABASE. | `string` | `"LOG"` | no |
+| crawler\_schema\_change\_update\_behavior | UPDATE\_IN\_DATABASE (update tables in place) or LOG. | `string` | `"UPDATE_IN_DATABASE"` | no |
+| crawler\_table\_level | Folder depth where the crawler creates tables (bucket = 1). Set it to the depth of `<prefix>/<table>/` so a prefix with a single table is not collapsed into one table with `partition_0`. Null keeps Glue's grouping. | `number` | `null` | no |
+| create\_connection | Create a JDBC Glue connection. It only provides the network wiring (ENIs in your VPC) and references the secret through `SECRET_ID`. Set false for sources reachable without a VPC. | `bool` | `true` | no |
+| create\_crawler | Create a crawler that catalogs the output. Only needed when the schema changes: the job overwrites the data and Athena reads it right away. | `bool` | `false` | no |
+| create\_iam\_role | Create a least-privilege role for the job and crawler. Set false and pass `iam_role_arn` to bring your own. | `bool` | `true` | no |
+| create\_trigger | Create a Glue trigger for the job. | `bool` | `false` | no |
+| default\_arguments | Extra job arguments, merged last (they override the module's). | `map(string)` | `{}` | no |
+| execution\_class | `STANDARD` or `FLEX` (cheaper, delayed start). Applies to glueetl only; the API rejects it for pythonshell. | `string` | `null` | no |
+| extra\_py\_files | S3 URIs of wheels or .py files for `--extra-py-files`. Use it for pg8000 when the subnet has no internet access (see README). | `list(string)` | `[]` | no |
+| extract\_discover | Bundled extractor only: dump every base table of `extract_schema` instead of `extract_tables`. Tables without SELECT are skipped and reported; other failures fail the run after the remaining tables are written. | `bool` | `false` | no |
+| extract\_exclude\_tables | Bundled extractor only: tables to skip in discover mode, in addition to migration bookkeeping tables (`schema_migrations`, `flyway_schema_history`, ...). | `list(string)` | `[]` | no |
+| extract\_schema | Bundled extractor only: schema scanned in discover mode. | `string` | `"public"` | no |
+| extract\_ssl\_mode | Bundled extractor only: `require` (TLS without certificate verification, like libpq sslmode=require) or `verify-full` (needs `--ssl_root_cert` in default\_arguments). There is no plaintext fallback. | `string` | `"require"` | no |
+| extract\_tables | Bundled extractor only: tables to dump, as `schema.table` (schema defaults to public). Ignored when `extract_discover` is true. | `list(string)` | `[]` | no |
+| glue\_version | Glue version. Defaults to `3.0` for pythonshell and `4.0` for glueetl. | `string` | `null` | no |
+| iam\_additional\_read\_s3\_paths | Extra `s3://bucket/prefix/` paths the role may read (e.g. custom libraries, CA bundles). | `list(string)` | `[]` | no |
+| iam\_role\_arn | Existing role for the job and crawler. Required when `create_iam_role` is false. | `string` | `null` | no |
+| iam\_role\_permissions\_boundary | Permissions boundary ARN for the created role. | `string` | `null` | no |
+| job\_timeout | Job timeout in minutes. Keep it explicit: a stuck job ends in TIMEOUT (which the alert rule catches) instead of running for Glue's 48 h default. | `number` | `60` | no |
+| job\_type | `pythonshell` (0.0625 or 1 DPU; right for most table dumps) or `glueetl` (Spark, sized with workers). Changing it replaces the job. | `string` | `"pythonshell"` | no |
+| max\_capacity | DPUs for pythonshell jobs: 0.0625 or 1. Ignored for glueetl. | `number` | `0.0625` | no |
+| max\_concurrent\_runs | Concurrent runs allowed. Keep 1 when the job overwrites a prefix: two writers on the same prefix duplicate rows. Extra StartJobRun calls fail with ConcurrentRunsExceeded, so callers (Step Functions) should retry. | `number` | `1` | no |
+| max\_retries | Automatic retries after a failed run. | `number` | `0` | no |
+| number\_of\_workers | Spark worker count for glueetl jobs (minimum 2). Ignored for pythonshell. | `number` | `2` | no |
+| python\_modules | pip requirements for `--additional-python-modules` (e.g. `pg8000==1.31.5`). Needs internet access (NAT) from the subnet. | `list(string)` | `[]` | no |
+| python\_version | Python version. Defaults to `3.9` for pythonshell and `3` for glueetl. | `string` | `null` | no |
+| pythonshell\_library\_set | `--library-set` for pythonshell 3.9 jobs. `analytics` preloads pyarrow, pandas and boto3. Null omits it. | `string` | `"analytics"` | no |
+| rds\_iam\_auth\_resource\_arns | `rds-db:connect` resources (`arn:aws:rds-db:<region>:<account>:dbuser:<resource-id>/<user>`) for IAM database authentication. Empty when the secret carries a password. | `list(string)` | `[]` | no |
+| script\_local\_path | Local path of a custom script to upload. Leave both this and `script_s3_key` null to use the bundled PostgreSQL extractor (`scripts/pg_extractor.py`). | `string` | `null` | no |
+| script\_s3\_key | S3 key of a script that already exists in `scripts_bucket` (nothing is uploaded). Takes precedence over `script_local_path`. | `string` | `null` | no |
+| scripts\_prefix | S3 prefix for uploaded scripts. The key is `<scripts_prefix>/<name>/<file>`. | `string` | `"scripts/jobs"` | no |
+| secret\_kms\_key\_arn | Customer managed KMS key that encrypts the secret, if any. Grants `kms:Decrypt` to the created role. | `string` | `null` | no |
+| security\_group\_ids | Security groups for the connection ENIs. Glue requires one of them to allow all TCP from itself (self-referencing rule). | `list(string)` | `[]` | no |
+| subnet\_id | Subnet for the connection ENIs. Required when `create_connection` is true. It needs a route to S3 (gateway endpoint) and to Secrets Manager (interface endpoint or NAT). | `string` | `null` | no |
+| tags | Tags for every taggable resource. Prefer provider `default_tags` for organization-wide tags. | `map(string)` | `{}` | no |
+| trigger\_enabled | Whether the trigger is active. | `bool` | `true` | no |
+| trigger\_name | Trigger name. Defaults to `name`. | `string` | `null` | no |
+| trigger\_schedule | Cron for SCHEDULED triggers, e.g. `cron(0 3 * * ? *)` (UTC). | `string` | `null` | no |
+| trigger\_type | ON\_DEMAND or SCHEDULED. | `string` | `"SCHEDULED"` | no |
+| worker\_type | Spark worker type for glueetl jobs. Ignored for pythonshell. | `string` | `"G.1X"` | no |
+
+## Outputs
+
+| Name | Description |
+|------|-------------|
+| connection\_name | Glue connection name (null when not created). |
+| crawler\_name | Crawler name (null when not created). |
+| job\_arn | Glue job ARN. |
+| job\_name | Glue job name. |
+| output\_s3\_path | S3 prefix the job writes to. |
+| role\_arn | Role used by the job and the crawler. |
+| role\_name | Name of the created role (null when `create_iam_role` is false). |
+| script\_s3\_uri | S3 URI of the job script. |
+| trigger\_name | Schedule trigger name (null when not created). |
+<!-- END_TF_DOCS -->

@@ -1,0 +1,6 @@
+# Glue Python shell runs 3.9: keep the bundled script compatible.
+target-version = "py39"
+line-length = 100
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]

@@ -1,0 +1,27 @@
+environment        = "dev"
+scripts_bucket     = "example-glue-scripts"
+lake_bucket        = "example-datalake"
+subnet_id          = "subnet-0123456789abcdef0"
+security_group_ids = ["sg-0123456789abcdef0"]
+
+postgres_sources = {
+  orders-db = {
+    host       = "orders.cluster-example.us-east-1.rds.amazonaws.com"
+    database   = "orders"
+    secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:orders/reader-AbCdEf"
+  }
+  billing-db = {
+    host       = "billing.cluster-example.us-east-1.rds.amazonaws.com"
+    database   = "billing"
+    secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:billing/reader-AbCdEf"
+    tables     = ["public.invoices", "public.payments"]
+    schedule   = "cron(5 * * * ? *)"
+  }
+}
+
+mysql_source = {
+  host       = "legacy.example.internal"
+  database   = "legacy"
+  secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:legacy/reader-AbCdEf"
+  tables     = ["customers", "orders"]
+}
