@@ -14,7 +14,7 @@ terraform {
 
 provider "postgresql" {
   database  = "grants_test"
-  superuser = false
+  superuser = false # like the RDS master user
 }
 
 module "grants" {

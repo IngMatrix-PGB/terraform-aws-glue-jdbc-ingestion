@@ -134,3 +134,25 @@ jobs:
           PGUSER: postgres
           PGPASSWORD: admin
         run: tests/grants/run.sh
+
+  floci:
+    name: apply on Floci (AWS emulator)
+    runs-on: ubuntu-latest
+    services:
+      floci:
+        image: floci/floci:2.3.0
+        ports:
+          - 4566:4566
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: wait for Floci
+        run: |
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:4566/_localstack/health >/dev/null && break
+            sleep 2
+          done
+      - name: apply, empty plan, inspect, destroy
+        run: tests/floci/run.sh

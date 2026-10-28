@@ -564,6 +564,17 @@ variable "crawler_schema_change_delete_behavior" {
 # Alerts
 ################################################################################
 
+variable "create_alerts" {
+  description = "Create the EventBridge alert rules. Null infers it from `alerts_sns_topic_arn`, which only works when the ARN is known at plan time: set true when the topic is created in the same apply."
+  type        = bool
+  default     = null
+
+  validation {
+    condition     = var.create_alerts != true || var.alerts_sns_topic_arn != null
+    error_message = "create_alerts = true needs alerts_sns_topic_arn."
+  }
+}
+
 variable "alerts_sns_topic_arn" {
   description = "SNS topic for EventBridge alerts when the job ends in FAILED/TIMEOUT/ERROR or the crawler fails. Its policy must allow `events.amazonaws.com` to publish. Null creates no alerts."
   type        = string
