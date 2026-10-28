@@ -35,5 +35,7 @@ PG_PORT=55432 AWS_DEFAULT_REGION=us-east-1 pytest tests/python
   changes, `docs:`, `chore:`): the squash commit takes the title and
   release-please builds the version and `CHANGELOG.md` from it. Do not edit
   versions, tags or `CHANGELOG.md` by hand; known gaps go in
-  `docs/TECH-DEBT.md`.
+  `docs/TECH-DEBT.md`. The release PR is opened with `GITHUB_TOKEN`, so CI
+  does not run on it; it only changes versions and the CHANGELOG, and the
+  commit it releases already passed CI on `main`.
 - No organization-specific names, account IDs or endpoints: this repository is public.
