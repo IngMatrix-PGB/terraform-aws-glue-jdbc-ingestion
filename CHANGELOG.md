@@ -2,6 +2,8 @@
 
 All notable changes to this module. Versions follow [SemVer](https://semver.org/);
 while the major version is 0, minor versions may break the interface.
+From 0.5.0 on, release-please writes the entries from the Conventional Commit
+titles of merged pull requests.
 
 ## [0.4.0] - 2026-10-27
 
