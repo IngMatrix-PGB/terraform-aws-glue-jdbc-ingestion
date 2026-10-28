@@ -3,6 +3,26 @@
 All notable changes to this module. Versions follow [SemVer](https://semver.org/);
 while the major version is 0, minor versions may break the interface.
 
+## [0.4.0] - Unreleased
+
+### Added
+
+- `modules/postgresql-grants`: USAGE and SELECT for the ingestion role plus
+  default privileges per real table owner (`table_owners`), applied to a real
+  PostgreSQL in CI (`tests/grants/run.sh`).
+- Source load controls: `extract_fetchsize`, `extract_fetchsize_overrides`
+  (per table) and `extract_statement_timeout_ms`.
+- README "Operating the source": schedule by consumer freshness, read from a
+  replica with low failover priority, attribute load, grant for the creating
+  role.
+
+### Changed
+
+- The extractor sets `application_name` to the job name (was the fixed
+  `glue-jdbc-ingestion`), so load on the source is attributable per job.
+- `--fetchsize` is always passed (default 50000, as before).
+- Examples and README schedule the dumps daily instead of every 30 minutes.
+
 ## [0.3.0] - 2026-10-27
 
 ### Added

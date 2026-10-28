@@ -31,7 +31,7 @@ jobs:
         run: terraform fmt -check -recursive -diff
       - name: validate
         run: |
-          for dir in . examples/minimal examples/complete; do
+          for dir in . modules/postgresql-grants examples/minimal examples/complete; do
             echo "::group::$dir"
             terraform -chdir="$dir" init -backend=false -input=false
             terraform -chdir="$dir" validate
@@ -71,6 +71,13 @@ jobs:
           output-method: inject
           git-push: "false"
           fail-on-diff: "true"
+      - uses: terraform-docs/gh-actions@v1.3.0
+        with:
+          working-dir: modules/postgresql-grants
+          config-file: ${{ github.workspace }}/.terraform-docs.yml
+          output-method: inject
+          git-push: "false"
+          fail-on-diff: "true"
 
   extractor:
     name: extractor (python 3.9 + postgres)
@@ -104,3 +111,26 @@ jobs:
           PG_NOSSL_PORT: "55433"
           AWS_DEFAULT_REGION: us-east-1
         run: .venv/bin/python -m pytest -v tests/python
+
+  grants:
+    name: postgresql-grants (real apply)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: PostgreSQL
+        run: |
+          docker run -d --name pg -e POSTGRES_PASSWORD=admin -p 55433:5432 postgres:16
+          for _ in $(seq 1 30); do
+            docker exec pg pg_isready -h 127.0.0.1 -U postgres && break
+            sleep 1
+          done
+      - name: apply and check privileges
+        env:
+          PGHOST: localhost
+          PGPORT: "55433"
+          PGUSER: postgres
+          PGPASSWORD: admin
+        run: tests/grants/run.sh

@@ -19,5 +19,5 @@ module "orders_db" {
   python_modules = ["pg8000==1.31.5"]
 
   create_trigger   = true
-  trigger_schedule = "cron(0/30 * * * ? *)"
+  trigger_schedule = "cron(0 9 * * ? *)" # daily
 }
