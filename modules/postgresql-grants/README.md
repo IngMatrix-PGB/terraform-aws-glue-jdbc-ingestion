@@ -15,7 +15,7 @@ provider "postgresql" {
 
 module "orders_db_grants" {
   source  = "IngMatrix-PGB/glue-jdbc-ingestion/aws//modules/postgresql-grants"
-  version = "0.4.2" # x-release-please-version
+  version = "0.4.3" # x-release-please-version
 
   database     = "orders"
   role         = "lake_reader"           # the job secret's username
