@@ -63,8 +63,14 @@ locals {
 
   extractor_arguments = local.use_bundled_extractor ? merge(
     {
-      "--ssl_mode" = var.extract_ssl_mode
+      "--ssl_mode"  = var.extract_ssl_mode
+      "--fetchsize" = tostring(var.extract_fetchsize)
+      # Shows up in pg_stat_activity and Performance Insights: load on the
+      # source is attributable to this job, not to a shared database user.
+      "--application_name" = var.name
     },
+    length(var.extract_fetchsize_overrides) > 0 ? { "--fetchsize_overrides" = jsonencode(var.extract_fetchsize_overrides) } : {},
+    var.extract_statement_timeout_ms != null ? { "--statement_timeout_ms" = tostring(var.extract_statement_timeout_ms) } : {},
     var.kms_key_arn != null ? { "--s3_kms_key_arn" = var.kms_key_arn } : {},
     local.incremental ? {
       "--incremental" = jsonencode(var.extract_incremental)

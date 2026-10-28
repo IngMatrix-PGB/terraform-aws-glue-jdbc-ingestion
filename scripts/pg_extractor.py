@@ -16,6 +16,14 @@ Arguments (the module sets them):
   --schema            schema scanned in discover mode (default public)
   --exclude_tables    JSON list of tables to skip in discover mode
   --fetchsize         rows per chunk / Parquet part (default 50000)
+  --fetchsize_overrides
+                      JSON object {"schema.table": rows} for tables with wide
+                      rows (a chunk is held in memory: ~1 GB at 0.0625 DPU)
+  --statement_timeout_ms
+                      server-side limit for each statement (each FETCH), so a
+                      dump never holds the source longer than this per chunk
+  --application_name  shown in pg_stat_activity / Performance Insights, so the
+                      load on the source can be attributed to this job
   --ssl_mode          require | verify-full (no plaintext fallback)
   --ssl_root_cert     s3:// URI of a CA bundle, for verify-full
   --incremental       JSON object {"schema.table": "watermark_column"}; those
@@ -76,6 +84,9 @@ OPTIONAL_ARGS = [
     "incremental",
     "state_path",
     "s3_kms_key_arn",
+    "fetchsize_overrides",
+    "statement_timeout_ms",
+    "application_name",
 ]
 
 # Migration bookkeeping and extension catalogs: not business data, and many
@@ -229,10 +240,12 @@ def connect(args):
         password=password,
         ssl_context=ctx,
         timeout=300,
-        application_name="glue-jdbc-ingestion",
+        application_name=args.get("application_name") or "glue-jdbc-ingestion",
     )
     cur = conn.cursor()
     cur.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+    if args.get("statement_timeout_ms"):
+        cur.execute(f"SET statement_timeout = {int(args['statement_timeout_ms'])}")
     cur.close()
     conn.commit()
     print(f"Connected to {database}@{host}:{port} as {user}")
@@ -401,8 +414,9 @@ def discover_tables(conn, schema, excluded):
     return [(schema, n) for n in names if n not in skip]
 
 
-def extract_table(conn, ctx, schema, table, out_uri, watermark_column=None):
+def extract_table(conn, ctx, schema, table, out_uri, watermark_column=None, fetchsize=None):
     """Dump one table to out_uri. Returns (rows, mode)."""
+    fetchsize = int(fetchsize or ctx.fetchsize)
     bucket, prefix = parse_s3_uri(out_uri)
     state = read_state(ctx, schema, table) if watermark_column else None
     if state and (state.get("column") != watermark_column or state.get("value") is None):
@@ -441,7 +455,7 @@ def extract_table(conn, ctx, schema, table, out_uri, watermark_column=None):
                 raise TypeError(f"Watermark {watermark_column} has unsupported type {wm_type}")
 
         while True:
-            cur.execute(f"FETCH FORWARD {int(ctx.fetchsize)} FROM {cursor_name}")
+            cur.execute(f"FETCH FORWARD {fetchsize} FROM {cursor_name}")
             rows = cur.fetchall()
             # A full dump of an empty table still gets one empty part, so the
             # crawler sees its columns; an empty delta writes nothing.
@@ -453,7 +467,7 @@ def extract_table(conn, ctx, schema, table, out_uri, watermark_column=None):
                 values = [r[wm_index] for r in rows if r[wm_index] is not None]
                 if values:
                     high = max(values) if high is None else max(high, *values)
-            if len(rows) < ctx.fetchsize:
+            if len(rows) < fetchsize:
                 break
     except Exception:
         # Leave the previous snapshot as it was.
@@ -500,6 +514,9 @@ def run(args, conn, s3):
         state_path=args.get("state_path") or None,
     )
     incremental = {split_table(t): c for t, c in json.loads(args.get("incremental", "{}")).items()}
+    overrides = {
+        split_table(t): int(n) for t, n in json.loads(args.get("fetchsize_overrides", "{}")).items()
+    }
     if incremental and not ctx.state_path:
         raise ValueError("--incremental needs --state_path")
 
@@ -521,7 +538,13 @@ def run(args, conn, s3):
         out_uri = f"{base}{folder_name(schema, table)}/"
         try:
             rows, mode = extract_table(
-                conn, ctx, schema, table, out_uri, incremental.get((schema, table))
+                conn,
+                ctx,
+                schema,
+                table,
+                out_uri,
+                watermark_column=incremental.get((schema, table)),
+                fetchsize=overrides.get((schema, table)),
             )
             print(f"  OK      {schema}.{table} -> {out_uri} ({rows} rows, {mode})")
         except Exception as exc:  # keep going; fail at the end

@@ -322,6 +322,40 @@ variable "extract_ssl_mode" {
   }
 }
 
+variable "extract_fetchsize" {
+  description = "Bundled extractor only: rows per chunk and Parquet part. A chunk is held in memory (about 1 GB at 0.0625 DPU), so lower it, or use `max_capacity = 1`, for wide rows."
+  type        = number
+  default     = 50000
+
+  validation {
+    condition     = var.extract_fetchsize >= 1
+    error_message = "extract_fetchsize must be at least 1."
+  }
+}
+
+variable "extract_fetchsize_overrides" {
+  description = "Bundled extractor only: per-table chunk size, as `{ \"schema.table\" = rows }`, for the few tables with wide rows (large JSON, bytea) so the rest keep the faster default."
+  type        = map(number)
+  default     = {}
+  nullable    = false
+
+  validation {
+    condition     = alltrue([for n in values(var.extract_fetchsize_overrides) : n >= 1])
+    error_message = "Every extract_fetchsize_overrides value must be at least 1."
+  }
+}
+
+variable "extract_statement_timeout_ms" {
+  description = "Bundled extractor only: PostgreSQL `statement_timeout` for the session, applied to each FETCH. Caps how long one chunk can load the source (a table that hits it fails and keeps its previous snapshot). Null keeps the server default."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.extract_statement_timeout_ms == null || try(var.extract_statement_timeout_ms >= 1000, false)
+    error_message = "extract_statement_timeout_ms must be at least 1000."
+  }
+}
+
 variable "extract_incremental" {
   description = "Bundled extractor only: tables appended incrementally, as `{ \"schema.table\" = \"watermark_column\" }`. Each run writes the rows whose watermark is greater than the last one seen to `<table>/ingest_date=YYYY-MM-DD/`; the first run is a full reload. The column must be an integer, numeric, date or timestamp. Delivery is at-least-once and rows are new versions, not upserts: deduplicate by primary key downstream."
   type        = map(string)
