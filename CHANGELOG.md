@@ -5,6 +5,13 @@ while the major version is 0, minor versions may break the interface.
 From 0.4.1 on, release-please writes the entries from the Conventional Commit
 titles of merged pull requests.
 
+## [0.4.3](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/compare/v0.4.2...v0.4.3) (2026-10-28)
+
+
+### Documentation
+
+* warn against moving published tags and record the registry cache issue ([#15](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/issues/15)) ([62c603b](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/commit/62c603bdaad1802d0a3925daa84193f1dc377375))
+
 ## [0.4.2](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/compare/v0.4.1...v0.4.2) (2026-10-28)
 
 

@@ -33,7 +33,7 @@ Highlights:
 ```hcl
 module "orders_db" {
   source  = "IngMatrix-PGB/glue-jdbc-ingestion/aws"
-  version = "0.4.2" # x-release-please-version
+  version = "0.4.3" # x-release-please-version
 
   name           = "orders-db-prd"
   scripts_bucket = "my-glue-scripts"
