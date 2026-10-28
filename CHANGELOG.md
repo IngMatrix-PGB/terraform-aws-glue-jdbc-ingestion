@@ -10,14 +10,14 @@ titles of merged pull requests.
 
 ### Documentation
 
-* point the READMEs at the Terraform Registry and render the diagram as an image ([#13](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/issues/13)) ([0dbabb3](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/commit/0dbabb36ae5c26784e26ae4bee17a43c9267b4ce))
+* point the READMEs at the Terraform Registry and render the diagram as an image ([#13](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/issues/13)) ([7d37778](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/commit/7d377780db11c3883756eba265dc2b2dd9cde652))
 
 ## [0.4.1](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/compare/v0.4.0...v0.4.1) (2026-10-28)
 
 
 ### Bug Fixes
 
-* first apply fails when the SNS topic or subnet is created in the same run ([#5](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/issues/5)) ([7ff109f](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/commit/7ff109f4d0827b13f5e704d26353dbfd29bd50c1))
+* first apply fails when the SNS topic or subnet is created in the same run ([#5](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/issues/5)) ([cf0567f](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/commit/cf0567f6e988db1f4b9a608a4c4e00b2911f29aa))
 
 ## [0.4.0] - 2026-10-27
 
