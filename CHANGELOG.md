@@ -3,7 +3,7 @@
 All notable changes to this module. Versions follow [SemVer](https://semver.org/);
 while the major version is 0, minor versions may break the interface.
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-10-27
 
 ### Breaking
 
