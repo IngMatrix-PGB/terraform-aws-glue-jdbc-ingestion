@@ -1,6 +1,7 @@
 # Several PostgreSQL sources from one map (for_each, not copy-pasted module
-# blocks), a chained crawler per source, failure alerts to SNS, and one Spark
-# job with a custom script for a MySQL source.
+# blocks), a chained crawler per source, failure alerts to SNS, KMS encryption
+# at rest, incremental tables, and one Spark job with a custom script for a
+# MySQL source.
 
 locals {
   # Wheels in ./libs (see README) are uploaded and used through
@@ -50,6 +51,42 @@ resource "aws_sns_topic_subscription" "email" {
 }
 
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+################################################################################
+# Encryption at rest: one key for Parquet, watermarks, logs and bookmarks
+################################################################################
+
+resource "aws_kms_key" "lake" {
+  description         = "Glue ingestion data at rest (${var.environment})"
+  enable_key_rotation = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AccountAdmin"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        # Glue security configurations encrypt the job's log groups.
+        Sid       = "CloudWatchLogsForGlue"
+        Effect    = "Allow"
+        Principal = { Service = "logs.${data.aws_region.current.region}.amazonaws.com" }
+        Action    = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"]
+        Resource  = "*"
+        Condition = {
+          ArnLike = {
+            "kms:EncryptionContext:aws:logs:arn" = "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/aws-glue/*"
+          }
+        }
+      },
+    ]
+  })
+}
 
 ################################################################################
 # PostgreSQL sources (bundled extractor)
@@ -78,6 +115,10 @@ module "postgres" {
   extract_discover       = length(each.value.tables) == 0
   extract_tables         = each.value.tables
   extract_exclude_tables = each.value.exclude_tables
+  extract_incremental    = each.value.incremental
+
+  kms_key_arn                   = aws_kms_key.lake.arn
+  create_security_configuration = true
 
   extra_py_files = [for o in aws_s3_object.wheels : "s3://${o.bucket}/${o.key}"]
   python_modules = length(local.wheels) == 0 ? ["pg8000==1.31.5"] : []

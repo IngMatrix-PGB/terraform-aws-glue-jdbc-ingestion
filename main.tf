@@ -27,6 +27,14 @@ locals {
   trigger_name    = coalesce(var.trigger_name, var.name)
   role_arn        = var.create_iam_role ? aws_iam_role.this[0].arn : var.iam_role_arn
 
+  security_configuration = var.create_security_configuration ? aws_glue_security_configuration.this[0].name : var.security_configuration
+
+  incremental = local.use_bundled_extractor && length(var.extract_incremental) > 0
+  state_s3_path = coalesce(
+    var.extract_state_s3_path,
+    "s3://${var.scripts_bucket}/${trim(var.scripts_prefix, "/")}/${var.name}/state/",
+  )
+
   output_bucket = regex("^s3://([^/]+)/(.*)$", var.output_s3_path)[0]
   output_prefix = regex("^s3://([^/]+)/(.*)$", var.output_s3_path)[1]
 
@@ -57,6 +65,11 @@ locals {
     {
       "--ssl_mode" = var.extract_ssl_mode
     },
+    var.kms_key_arn != null ? { "--s3_kms_key_arn" = var.kms_key_arn } : {},
+    local.incremental ? {
+      "--incremental" = jsonencode(var.extract_incremental)
+      "--state_path"  = local.state_s3_path
+    } : {},
     var.extract_discover ? {
       "--discover"       = "true"
       "--schema"         = var.extract_schema
@@ -125,6 +138,35 @@ resource "aws_glue_connection" "this" {
 }
 
 ################################################################################
+# Encryption at rest
+################################################################################
+
+# Immutable: changing the key replaces it under the same name. The job and
+# crawler reference it by name, so they keep pointing at the new one.
+resource "aws_glue_security_configuration" "this" {
+  count = var.create_security_configuration ? 1 : 0
+
+  name = var.name
+
+  encryption_configuration {
+    cloudwatch_encryption {
+      cloudwatch_encryption_mode = "SSE-KMS"
+      kms_key_arn                = var.kms_key_arn
+    }
+
+    job_bookmarks_encryption {
+      job_bookmarks_encryption_mode = "CSE-KMS"
+      kms_key_arn                   = var.kms_key_arn
+    }
+
+    s3_encryption {
+      s3_encryption_mode = "SSE-KMS"
+      kms_key_arn        = var.kms_key_arn
+    }
+  }
+}
+
+################################################################################
 # Glue job
 ################################################################################
 
@@ -144,6 +186,8 @@ resource "aws_glue_job" "this" {
   glue_version = local.glue_version
   timeout      = var.job_timeout
   max_retries  = var.max_retries
+
+  security_configuration = local.security_configuration
 
   connections = var.create_connection && var.attach_connection_to_job ? [aws_glue_connection.this[0].name] : []
 
@@ -194,6 +238,18 @@ resource "aws_glue_job" "this" {
     precondition {
       condition     = !var.chain_crawler || var.create_crawler
       error_message = "chain_crawler needs create_crawler = true."
+    }
+    precondition {
+      condition     = !var.create_security_configuration || var.kms_key_arn != null
+      error_message = "create_security_configuration needs kms_key_arn."
+    }
+    precondition {
+      condition     = !(var.create_security_configuration && var.security_configuration != null)
+      error_message = "Set create_security_configuration or security_configuration, not both."
+    }
+    precondition {
+      condition     = length(var.extract_incremental) == 0 || local.use_bundled_extractor
+      error_message = "extract_incremental applies to the bundled extractor only."
     }
   }
 }

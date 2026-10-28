@@ -42,3 +42,13 @@ output "output_s3_path" {
   description = "S3 prefix the job writes to."
   value       = var.output_s3_path
 }
+
+output "security_configuration_name" {
+  description = "Glue security configuration attached to the job and the crawler, if any."
+  value       = local.security_configuration
+}
+
+output "state_s3_path" {
+  description = "Where the bundled extractor stores incremental watermarks (null without `extract_incremental`)."
+  value       = local.incremental ? local.state_s3_path : null
+}

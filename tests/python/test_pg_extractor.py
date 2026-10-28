@@ -91,6 +91,12 @@ def database():
         GRANT USAGE ON SCHEMA billing TO reader;
         GRANT SELECT ON orders, empty_table, schema_migrations, "Mixed Case" TO reader;
         GRANT SELECT ON billing.invoices TO reader;
+        CREATE TABLE events (id bigint, updated_at timestamptz);
+        INSERT INTO events
+        SELECT g, '2026-01-01 00:00:00+00'::timestamptz + g * interval '1 minute'
+        FROM generate_series(1, 3) g;
+        INSERT INTO events VALUES (99, NULL);
+        GRANT SELECT ON events TO reader;
         """
     )
     conn.close()
@@ -187,6 +193,102 @@ def test_permission_denied_does_not_delete_existing_data(aws):
     s3.put_object(Bucket=BUCKET, Key="raw/app/secret_stuff/keep.parquet", Body=b"x")
     pg_extractor.main(args_for(arn, discover="true"))
     assert list_keys(s3, "secret_stuff") == ["raw/app/secret_stuff/keep.parquet"]
+
+
+def test_failed_table_keeps_previous_snapshot(aws, monkeypatch):
+    s3, arn = aws
+    real_write_part = pg_extractor.write_part
+
+    def flaky_write_part(ctx, table, bucket, prefix, index):
+        if index == 1:
+            raise OSError("S3 went away")
+        return real_write_part(ctx, table, bucket, prefix, index)
+
+    monkeypatch.setattr(pg_extractor, "write_part", flaky_write_part)
+    with pytest.raises(RuntimeError, match="public.orders"):
+        pg_extractor.main(args_for(arn, tables='["orders"]', fetchsize="2"))
+    assert list_keys(s3, "orders") == ["raw/app/orders/part-old.snappy.parquet"], (
+        "the old snapshot stays and the new part 0 is removed"
+    )
+
+
+def test_full_dump_swaps_only_after_the_last_part(aws, monkeypatch):
+    s3, arn = aws
+    seen = []
+    real_write_part = pg_extractor.write_part
+
+    def spy(ctx, table, bucket, prefix, index):
+        seen.append(list_keys(s3, "orders"))
+        return real_write_part(ctx, table, bucket, prefix, index)
+
+    monkeypatch.setattr(pg_extractor, "write_part", spy)
+    pg_extractor.main(args_for(arn, tables='["orders"]', fetchsize="2"))
+    assert all("raw/app/orders/part-old.snappy.parquet" in keys for keys in seen)
+    keys = list_keys(s3, "orders")
+    assert len(keys) == 3 and "raw/app/orders/part-old.snappy.parquet" not in keys
+
+
+def test_incremental_appends_only_new_rows(aws):
+    s3, arn = aws
+    s3.put_object(Bucket=BUCKET, Key="raw/app/events/legacy-flat.parquet", Body=b"x")
+    argv = args_for(
+        arn,
+        tables='["events"]',
+        incremental='{"public.events": "updated_at"}',
+        state_path=f"s3://{BUCKET}/state/app/",
+    )
+
+    # First run: full reload into today's partition, replacing the flat layout.
+    pg_extractor.main(argv)
+    first = list_keys(s3, "events")
+    assert len(first) == 1 and "/ingest_date=" in first[0]
+    assert (
+        pq.read_table(
+            io.BytesIO(s3.get_object(Bucket=BUCKET, Key=first[0])["Body"].read())
+        ).num_rows
+        == 4
+    )
+    state = json.loads(s3.get_object(Bucket=BUCKET, Key="state/app/events.json")["Body"].read())
+    assert state["column"] == "updated_at" and state["value"].startswith("2026-01-01T00:03:00")
+
+    conn = admin_conn(DB)
+    conn.cursor().execute(
+        "INSERT INTO events VALUES (4, '2026-01-02 00:00:00+00'), (5, '2026-01-02 00:00:01+00')"
+    )
+    conn.close()
+
+    # Second run: only the two new rows, appended next to the first part.
+    pg_extractor.main(argv)
+    keys = list_keys(s3, "events")
+    new = [k for k in keys if k not in first]
+    assert first[0] in keys and len(new) == 1
+    rows = pq.read_table(io.BytesIO(s3.get_object(Bucket=BUCKET, Key=new[0])["Body"].read()))
+    assert sorted(rows.column("id").to_pylist()) == [4, 5]
+
+    # Third run: nothing new, nothing written, watermark unchanged.
+    pg_extractor.main(argv)
+    assert list_keys(s3, "events") == keys
+    state = json.loads(s3.get_object(Bucket=BUCKET, Key="state/app/events.json")["Body"].read())
+    assert state["value"].startswith("2026-01-02T00:00:01")
+
+
+def test_incremental_needs_state_path(aws):
+    _, arn = aws
+    with pytest.raises(ValueError, match="state_path"):
+        pg_extractor.main(
+            args_for(arn, tables='["events"]', incremental='{"events": "updated_at"}')
+        )
+
+
+def test_objects_are_kms_encrypted(aws):
+    s3, arn = aws
+    key_arn = boto3.client("kms").create_key()["KeyMetadata"]["Arn"]
+    pg_extractor.main(args_for(arn, tables='["orders"]', s3_kms_key_arn=key_arn))
+    for key in list_keys(s3, "orders"):
+        head = s3.head_object(Bucket=BUCKET, Key=key)
+        assert head["ServerSideEncryption"] == "aws:kms" and head["SSEKMSKeyId"].endswith(
+            key_arn.split("/")[-1]
+        )
 
 
 def test_credentials_never_come_from_arguments(aws):

@@ -20,6 +20,9 @@ locals {
   crawler_prefix = regex("^s3://([^/]+)/?(.*)$", local.crawler_target)[1]
 
   glue_catalog_arn = "arn:${local.partition}:glue:${local.region}:${local.account_id}:catalog"
+
+  state_bucket = regex("^s3://([^/]+)/?(.*)$", local.state_s3_path)[0]
+  state_prefix = regex("^s3://([^/]+)/?(.*)$", local.state_s3_path)[1]
 }
 
 data "aws_iam_policy_document" "assume" {
@@ -91,6 +94,41 @@ data "aws_iam_policy_document" "this" {
   }
 
   dynamic "statement" {
+    for_each = local.incremental ? [1] : []
+    content {
+      sid       = "ListWatermarks"
+      actions   = ["s3:ListBucket"]
+      resources = ["${local.s3_arn}${local.state_bucket}"]
+
+      condition {
+        test     = "StringLike"
+        variable = "s3:prefix"
+        values   = [local.state_prefix, "${local.state_prefix}*"]
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = local.incremental ? [1] : []
+    content {
+      sid       = "ReadWriteWatermarks"
+      actions   = ["s3:GetObject", "s3:PutObject"]
+      resources = ["${local.s3_arn}${local.state_bucket}/${local.state_prefix}*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.kms_key_arn != null ? [1] : []
+    content {
+      # SSE-KMS writes and reads (job and crawler), encrypted logs and
+      # CSE-KMS bookmarks.
+      sid       = "UseDataKey"
+      actions   = ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
+      resources = [var.kms_key_arn]
+    }
+  }
+
+  dynamic "statement" {
     for_each = length(var.rds_iam_auth_resource_arns) > 0 ? [1] : []
     content {
       sid       = "RdsIamAuth"
@@ -147,8 +185,10 @@ data "aws_iam_policy_document" "this" {
   }
 
   statement {
-    sid     = "GlueLogs"
-    actions = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+    sid = "GlueLogs"
+    # AssociateKmsKey: a security configuration with CloudWatch encryption
+    # makes the job attach the key to its log group.
+    actions = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "logs:AssociateKmsKey"]
     resources = [
       "arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:/aws-glue/*",
       "arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:/aws-glue/*:log-stream:*",
