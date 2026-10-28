@@ -3,5 +3,5 @@ pg8000==1.31.5
 pyarrow==14.0.2
 numpy==1.26.4
 boto3==1.35.99
-moto[s3,secretsmanager]==5.0.28
+moto[s3,secretsmanager,kms]==5.0.28
 pytest==8.3.5

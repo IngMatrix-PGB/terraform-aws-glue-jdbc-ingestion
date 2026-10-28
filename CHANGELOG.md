@@ -3,6 +3,30 @@
 All notable changes to this module. Versions follow [SemVer](https://semver.org/);
 while the major version is 0, minor versions may break the interface.
 
+## [0.3.0] - 2026-10-27
+
+### Added
+
+- Encryption at rest: `kms_key_arn` (SSE-KMS on every object the bundled
+  extractor writes, plus role permissions), `create_security_configuration`
+  (Glue security configuration for S3, CloudWatch Logs and bookmarks) or an
+  existing `security_configuration`, attached to the job and the crawler.
+- Incremental extraction: `extract_incremental` (watermark column per table,
+  appended to `ingest_date=` partitions) and `extract_state_s3_path`, with a
+  role scoped to the watermark prefix. Outputs `security_configuration_name`
+  and `state_s3_path`.
+
+### Changed
+
+- Full dumps are write-then-delete: a failing table keeps its previous
+  snapshot and readers never see it empty or partial. Part names are now
+  `part-<run>-NNNNN.snappy.parquet`; the first run after upgrading removes
+  the old-style parts like any other stale object.
+- The extractor ends each table's transaction with a rollback instead of
+  `CLOSE`, so a mid-table error is reported as itself instead of
+  "current transaction is aborted".
+- Checkov CKV_AWS_195 is no longer skipped.
+
 ## [0.2.0] - 2026-10-27
 
 ### Breaking

@@ -5,9 +5,5 @@ framework:
 skip-path:
   - examples
   - tests
-skip-check:
-  # Glue security configuration (KMS for S3, CloudWatch and bookmarks) is
-  # planned: see docs/TECH-DEBT.md. Remove this skip when it lands.
-  - CKV_AWS_195
 quiet: true
 compact: true
