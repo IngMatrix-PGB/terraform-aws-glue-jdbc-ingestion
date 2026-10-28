@@ -8,7 +8,7 @@ for Glue Python shell, so a database can be landed with a dozen lines of HCL.
 ```hcl
 module "orders_db" {
   # Pin a release tag; the module is not on the public Registry yet.
-  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion?ref=v0.2.0"
+  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion?ref=v0.3.0"
 
   name           = "orders-db-prd"
   scripts_bucket = "my-glue-scripts"
@@ -43,6 +43,7 @@ chained crawlers, alerts and a Spark job with a custom script).
 | `aws_glue_trigger` (schedule) | `create_trigger` |
 | `aws_glue_crawler` + conditional triggers | `create_crawler`, `chain_crawler` |
 | EventBridge rules to SNS for failures | `alerts_sns_topic_arn` |
+| `aws_glue_security_configuration` (KMS for S3, logs, bookmarks) | `create_security_configuration` |
 
 ## Design decisions
 
@@ -58,8 +59,8 @@ failure or cost problem.
   Python shell job costs about a tenth of the smallest Spark job. Use
   `job_type = "glueetl"` for real transformations. Switching types replaces the
   job (an in-place update fails in the Glue API).
-- **One writer per prefix.** The extractor deletes a table's folder and then
-  writes new parts, so two concurrent runs would duplicate rows.
+- **One writer per prefix.** Each run replaces (or appends to) a table's
+  folder, so two concurrent runs would race and duplicate rows.
   `max_concurrent_runs` defaults to 1; callers such as Step Functions should
   retry `ConcurrentRunsExceeded`.
 - **Explicit timeout and failure alerts.** `job_timeout` defaults to 60
@@ -75,8 +76,15 @@ failure or cost problem.
   tables, and `crawler_table_level` stops Glue from collapsing a prefix that
   has a single table into one table with `partition_0`.
 - **Least privilege.** The role can read its script and the secret, write only
-  its output prefix and update only its catalog database. Delete permissions on
-  the catalog are granted only when the schema change policy can delete.
+  its output prefix (and the watermark prefix for incremental tables) and
+  update only its catalog database. Delete permissions on the catalog are
+  granted only when the schema change policy can delete.
+- **Encryption at rest is one key away.** With `kms_key_arn` the extractor
+  writes every object with SSE-KMS, and `create_security_configuration = true`
+  (or an existing `security_configuration`) encrypts the job's and crawler's
+  CloudWatch Logs and bookmarks. A security configuration's S3 setting only
+  covers Glue Spark sinks, which is why the extractor sets SSE itself. The key
+  policy must allow `logs.<region>.amazonaws.com` (see `examples/complete`).
 
 ## Bundled PostgreSQL extractor
 
@@ -86,9 +94,29 @@ failure or cost problem.
 - **Modes:** `extract_tables = ["public.orders", "billing.invoices"]`, or
   `extract_discover = true` for every table of `extract_schema` (migration
   bookkeeping tables such as `schema_migrations` are always skipped).
-- **Layout:** `<output_s3_path>/<table>/part-NNNNN-<id>.snappy.parquet`;
+- **Layout:** `<output_s3_path>/<table>/part-<run>-NNNNN.snappy.parquet`;
   tables outside `public` become `<schema>_<table>`. An empty table still
   gets one empty part so the crawler sees its columns.
+- **Replacing a table (write-then-delete):** new parts are written next to
+  the old ones and the old objects are deleted only after the last part is
+  written. A table that fails keeps its previous snapshot and its new parts
+  are removed, so readers never see it empty or partial. During the delete
+  calls (well under a second for a few hundred parts) a query can see old and
+  new rows together; S3 has no atomic rename, so true atomicity needs a table
+  format such as Iceberg.
+- **Incremental tables:** `extract_incremental = { "public.payments" =
+  "created_at" }` appends the rows whose watermark is greater than the last
+  value seen to `<table>/ingest_date=YYYY-MM-DD/`. Watermarks are JSON files
+  under `extract_state_s3_path` (default: `state/` next to the script). The
+  first run, or a run after the column changes, is a full reload that
+  replaces the folder. Delivery is at-least-once and rows are new versions,
+  not upserts: deduplicate by primary key downstream. Rows with a NULL
+  watermark are only read by the full reload, and a transaction that commits
+  a value lower than one already read is missed: use a column set at insert
+  time or a sequence, index it, and schedule an occasional full reload by
+  deleting the state file if that matters. Each day is a new partition, which
+  Athena only sees once it is in the catalog: chain the crawler
+  (`chain_crawler`) or use partition projection on `ingest_date`.
 - **Memory:** a server-side cursor reads `--fetchsize` rows (default 50,000)
   at a time, one Parquet part per chunk.
 - **Safety:** read-only session, TLS always (`require`, or `verify-full`
@@ -108,8 +136,7 @@ failure or cost problem.
   pass them in `extra_py_files`:
   `pip download pg8000==1.31.5 --only-binary=:all: --python-version 3.9 -d libs/`.
 
-Known limit: while a table is rewritten, readers can see it empty or partial
-for a few seconds (see [docs/TECH-DEBT.md](docs/TECH-DEBT.md)).
+Known limits are tracked in [docs/TECH-DEBT.md](docs/TECH-DEBT.md).
 
 ## Network prerequisites
 
@@ -166,6 +193,7 @@ checks plus Checkov. Upgrading from 0.1.x: see [CHANGELOG.md](CHANGELOG.md).
 | [aws_glue_connection.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_connection) | resource |
 | [aws_glue_crawler.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_crawler) | resource |
 | [aws_glue_job.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_job) | resource |
+| [aws_glue_security_configuration.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_security_configuration) | resource |
 | [aws_glue_trigger.crawler_on_job_failure](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_trigger) | resource |
 | [aws_glue_trigger.crawler_on_job_success](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_trigger) | resource |
 | [aws_glue_trigger.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/glue_trigger) | resource |
@@ -207,14 +235,17 @@ checks plus Checkov. Upgrading from 0.1.x: see [CHANGELOG.md](CHANGELOG.md).
 | create\_connection | Create a JDBC Glue connection. It only provides the network wiring (ENIs in your VPC) and references the secret through `SECRET_ID`. Set false for sources reachable without a VPC. | `bool` | `true` | no |
 | create\_crawler | Create a crawler that catalogs the output. Only needed when the schema changes: the job overwrites the data and Athena reads it right away. | `bool` | `false` | no |
 | create\_iam\_role | Create a least-privilege role for the job and crawler. Set false and pass `iam_role_arn` to bring your own. | `bool` | `true` | no |
+| create\_security\_configuration | Create a Glue security configuration (SSE-KMS for S3 and CloudWatch Logs, CSE-KMS for bookmarks) with `kms_key_arn` and attach it to the job and the crawler. Glue writes to S3 only through Spark sinks: a script writing with boto3 (like the bundled extractor) must set SSE itself. | `bool` | `false` | no |
 | create\_trigger | Create a Glue trigger for the job. | `bool` | `false` | no |
 | default\_arguments | Extra job arguments, merged last (they override the module's). | `map(string)` | `{}` | no |
 | execution\_class | `STANDARD` or `FLEX` (cheaper, delayed start). Applies to glueetl only; the API rejects it for pythonshell. | `string` | `null` | no |
 | extra\_py\_files | S3 URIs of wheels or .py files for `--extra-py-files`. Use it for pg8000 when the subnet has no internet access (see README). | `list(string)` | `[]` | no |
 | extract\_discover | Bundled extractor only: dump every base table of `extract_schema` instead of `extract_tables`. Tables without SELECT are skipped and reported; other failures fail the run after the remaining tables are written. | `bool` | `false` | no |
 | extract\_exclude\_tables | Bundled extractor only: tables to skip in discover mode, in addition to migration bookkeeping tables (`schema_migrations`, `flyway_schema_history`, ...). | `list(string)` | `[]` | no |
+| extract\_incremental | Bundled extractor only: tables appended incrementally, as `{ "schema.table" = "watermark_column" }`. Each run writes the rows whose watermark is greater than the last one seen to `<table>/ingest_date=YYYY-MM-DD/`; the first run is a full reload. The column must be an integer, numeric, date or timestamp. Delivery is at-least-once and rows are new versions, not upserts: deduplicate by primary key downstream. | `map(string)` | `{}` | no |
 | extract\_schema | Bundled extractor only: schema scanned in discover mode. | `string` | `"public"` | no |
 | extract\_ssl\_mode | Bundled extractor only: `require` (TLS without certificate verification, like libpq sslmode=require) or `verify-full` (needs `--ssl_root_cert` in default\_arguments). There is no plaintext fallback. | `string` | `"require"` | no |
+| extract\_state\_s3\_path | Bundled extractor only: where incremental watermarks are stored (`s3://bucket/prefix/`, one JSON object per table). Defaults to `state/` under this job's scripts prefix, outside the crawler target. | `string` | `null` | no |
 | extract\_tables | Bundled extractor only: tables to dump, as `schema.table` (schema defaults to public). Ignored when `extract_discover` is true. | `list(string)` | `[]` | no |
 | glue\_version | Glue version. Defaults to `3.0` for pythonshell and `4.0` for glueetl. | `string` | `null` | no |
 | iam\_additional\_read\_s3\_paths | Extra `s3://bucket/prefix/` paths the role may read (e.g. custom libraries, CA bundles). | `list(string)` | `[]` | no |
@@ -222,6 +253,7 @@ checks plus Checkov. Upgrading from 0.1.x: see [CHANGELOG.md](CHANGELOG.md).
 | iam\_role\_permissions\_boundary | Permissions boundary ARN for the created role. | `string` | `null` | no |
 | job\_timeout | Job timeout in minutes. Keep it explicit: a stuck job ends in TIMEOUT (which the alert rule catches) instead of running for Glue's 48 h default. | `number` | `60` | no |
 | job\_type | `pythonshell` (0.0625 or 1 DPU; right for most table dumps) or `glueetl` (Spark, sized with workers). Changing it replaces the job. | `string` | `"pythonshell"` | no |
+| kms\_key\_arn | Customer managed KMS key for data at rest: the bundled extractor writes Parquet and watermarks with SSE-KMS, and a created security configuration uses it for S3, CloudWatch Logs and job bookmarks. Grants the created role encrypt/decrypt on it. The key policy must also allow `logs.<region>.amazonaws.com` when CloudWatch encryption is on. | `string` | `null` | no |
 | max\_capacity | DPUs for pythonshell jobs: 0.0625 or 1. Ignored for glueetl. | `number` | `0.0625` | no |
 | max\_concurrent\_runs | Concurrent runs allowed. Keep 1 when the job overwrites a prefix: two writers on the same prefix duplicate rows. Extra StartJobRun calls fail with ConcurrentRunsExceeded, so callers (Step Functions) should retry. | `number` | `1` | no |
 | max\_retries | Automatic retries after a failed run. | `number` | `0` | no |
@@ -234,6 +266,7 @@ checks plus Checkov. Upgrading from 0.1.x: see [CHANGELOG.md](CHANGELOG.md).
 | script\_s3\_key | S3 key of a script that already exists in `scripts_bucket` (nothing is uploaded). Takes precedence over `script_local_path`. | `string` | `null` | no |
 | scripts\_prefix | S3 prefix for uploaded scripts. The key is `<scripts_prefix>/<name>/<file>`. | `string` | `"scripts/jobs"` | no |
 | secret\_kms\_key\_arn | Customer managed KMS key that encrypts the secret, if any. Grants `kms:Decrypt` to the created role. | `string` | `null` | no |
+| security\_configuration | Name of an existing Glue security configuration to attach to the job and the crawler instead of creating one. | `string` | `null` | no |
 | security\_group\_ids | Security groups for the connection ENIs. Glue requires one of them to allow all TCP from itself (self-referencing rule). | `list(string)` | `[]` | no |
 | subnet\_id | Subnet for the connection ENIs. Required when `create_connection` is true. It needs a route to S3 (gateway endpoint) and to Secrets Manager (interface endpoint or NAT). | `string` | `null` | no |
 | tags | Tags for every taggable resource. Prefer provider `default_tags` for organization-wide tags. | `map(string)` | `{}` | no |
@@ -255,5 +288,7 @@ checks plus Checkov. Upgrading from 0.1.x: see [CHANGELOG.md](CHANGELOG.md).
 | role\_arn | Role used by the job and the crawler. |
 | role\_name | Name of the created role (null when `create_iam_role` is false). |
 | script\_s3\_uri | S3 URI of the job script. |
+| security\_configuration\_name | Glue security configuration attached to the job and the crawler, if any. |
+| state\_s3\_path | Where the bundled extractor stores incremental watermarks (null without `extract_incremental`). |
 | trigger\_name | Schedule trigger name (null when not created). |
 <!-- END_TF_DOCS -->

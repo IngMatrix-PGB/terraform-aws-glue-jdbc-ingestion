@@ -29,6 +29,8 @@ resource "aws_glue_crawler" "this" {
   schedule      = var.chain_crawler ? null : var.crawler_schedule
   configuration = local.crawler_configuration
 
+  security_configuration = local.security_configuration
+
   s3_target {
     path       = local.crawler_target
     exclusions = var.crawler_exclusions

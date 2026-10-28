@@ -39,6 +39,8 @@ variable "postgres_sources" {
     tables         = optional(list(string), [])
     exclude_tables = optional(list(string), [])
     schedule       = optional(string, "cron(0/30 * * * ? *)")
+    # { "schema.table" = "watermark_column" }: appended instead of overwritten.
+    incremental = optional(map(string), {})
   }))
 }
 

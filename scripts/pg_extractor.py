@@ -18,15 +18,33 @@ Arguments (the module sets them):
   --fetchsize         rows per chunk / Parquet part (default 50000)
   --ssl_mode          require | verify-full (no plaintext fallback)
   --ssl_root_cert     s3:// URI of a CA bundle, for verify-full
+  --incremental       JSON object {"schema.table": "watermark_column"}; those
+                      tables are appended instead of overwritten
+  --state_path        s3://bucket/prefix/ for watermarks (needed by
+                      --incremental)
+  --s3_kms_key_arn    KMS key for SSE-KMS on every object the job writes
 
 Behaviour:
   * Credentials only from Secrets Manager; never from arguments.
   * Read-only session; each table is read with a server-side cursor in chunks,
     so memory stays flat regardless of table size.
-  * Each table's folder is overwritten: old objects are deleted, then new parts
-    are written. Readers can see an empty or partial table for a few seconds,
-    and two concurrent runs on one prefix duplicate rows (keep
-    max_concurrent_runs = 1).
+  * Full dumps replace a table's folder write-then-delete: the new parts are
+    written next to the old ones (file names carry the run id) and the old
+    objects are deleted only after the last part is written. A failed table
+    keeps its previous snapshot and its new parts are removed, so readers
+    never see an empty or partial table; they can see old and new rows
+    together for the duration of the delete calls. Two concurrent runs on one
+    prefix still race (keep max_concurrent_runs = 1).
+  * Incremental tables are appended to <table>/ingest_date=YYYY-MM-DD/ with
+    the rows whose watermark column is greater than the last value stored in
+    --state_path. The first run (no state, or a different column) is a full
+    reload that replaces the folder. Delivery is at-least-once: if the job
+    dies after writing parts and before saving the watermark, the next run
+    writes those rows again. Rows are new versions, not upserts: deduplicate
+    by primary key downstream. Rows whose watermark is NULL are only read by
+    the first run, and a transaction that commits a value lower than one
+    already read is missed, so prefer a column assigned at commit time (or
+    a sequence) and schedule a periodic full reload if that matters.
   * A failing table does not stop the others: the job fails at the end and
     lists them. In discover mode, tables without SELECT (SQLSTATE 42501) are
     skipped and reported instead; they are new tables nobody granted yet.
@@ -38,7 +56,8 @@ import re
 import ssl
 import sys
 import uuid
-from datetime import timezone
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 
 import boto3
 import pg8000.dbapi
@@ -54,6 +73,9 @@ OPTIONAL_ARGS = [
     "fetchsize",
     "ssl_mode",
     "ssl_root_cert",
+    "incremental",
+    "state_path",
+    "s3_kms_key_arn",
 ]
 
 # Migration bookkeeping and extension catalogs: not business data, and many
@@ -70,6 +92,34 @@ ALWAYS_EXCLUDED = {
 
 DEFAULT_FETCHSIZE = 50000
 INSUFFICIENT_PRIVILEGE = "42501"
+
+# Watermark columns must have a total order that survives a round trip
+# through text (the stored value is cast back to the column type).
+WATERMARK_TYPES = {
+    "smallint",
+    "integer",
+    "bigint",
+    "numeric",
+    "date",
+    "timestamp without time zone",
+    "timestamp with time zone",
+}
+
+
+@dataclass
+class Context:
+    s3: object
+    fetchsize: int = DEFAULT_FETCHSIZE
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    ingest_date: str = field(default_factory=lambda: datetime.now(timezone.utc).date().isoformat())
+    kms_key_arn: str = None
+    state_path: str = None
+
+    def put(self, bucket, key, body, content_type=None):
+        extra = {"ContentType": content_type} if content_type else {}
+        if self.kms_key_arn:
+            extra.update(ServerSideEncryption="aws:kms", SSEKMSKeyId=self.kms_key_arn)
+        self.s3.put_object(Bucket=bucket, Key=key, Body=body, **extra)
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +295,7 @@ def arrow_column(data_type, precision, scale):
 
 
 def table_columns(conn, schema, table):
+    """[(name, data_type, arrow type, converter)] in ordinal order."""
     cur = conn.cursor()
     cur.execute(
         """
@@ -259,12 +310,12 @@ def table_columns(conn, schema, table):
     cur.close()
     if not rows:
         raise LookupError(f"Table {schema}.{table} not found or not visible")
-    return [(name, *arrow_column(dt, p, s)) for name, dt, p, s in rows]
+    return [(name, dt, *arrow_column(dt, p, s)) for name, dt, p, s in rows]
 
 
 def to_arrow(rows, columns):
     arrays, fields = [], []
-    for idx, (name, arrow_type, convert) in enumerate(columns):
+    for idx, (name, _, arrow_type, convert) in enumerate(columns):
         arrays.append(pa.array([convert(r[idx]) for r in rows], type=arrow_type))
         fields.append(pa.field(name, arrow_type))
     return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
@@ -273,19 +324,56 @@ def to_arrow(rows, columns):
 # ---------------------------------------------------------------------------
 # S3
 # ---------------------------------------------------------------------------
-def delete_prefix(s3, bucket, prefix):
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
-        for i in range(0, len(keys), 1000):
-            s3.delete_objects(Bucket=bucket, Delete={"Objects": keys[i : i + 1000], "Quiet": True})
+def delete_keys(s3, bucket, keys):
+    keys = list(keys)
+    for i in range(0, len(keys), 1000):
+        objects = [{"Key": k} for k in keys[i : i + 1000]]
+        s3.delete_objects(Bucket=bucket, Delete={"Objects": objects, "Quiet": True})
 
 
-def write_part(s3, table, bucket, prefix, index):
+def delete_prefix(s3, bucket, prefix, keep=()):
+    """Delete every object under prefix except the keys in keep."""
+    keep = set(keep)
+    stale = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        stale += [o["Key"] for o in page.get("Contents", []) if o["Key"] not in keep]
+    delete_keys(s3, bucket, stale)
+
+
+def write_part(ctx, table, bucket, prefix, index):
     buf = io.BytesIO()
     pq.write_table(table, buf, compression="snappy")
-    key = f"{prefix}part-{index:05d}-{uuid.uuid4().hex[:8]}.snappy.parquet"
-    s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
+    key = f"{prefix}part-{ctx.run_id}-{index:05d}.snappy.parquet"
+    ctx.put(bucket, key, buf.getvalue())
+    return key
+
+
+# ---------------------------------------------------------------------------
+# Watermarks
+# ---------------------------------------------------------------------------
+def state_location(ctx, schema, table):
+    bucket, prefix = parse_s3_uri(ctx.state_path.rstrip("/") + "/")
+    return bucket, f"{prefix}{folder_name(schema, table)}.json"
+
+
+def read_state(ctx, schema, table):
+    bucket, key = state_location(ctx, schema, table)
+    try:
+        body = ctx.s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    except ctx.s3.exceptions.NoSuchKey:
+        return None
+    return json.loads(body)
+
+
+def write_state(ctx, schema, table, state):
+    bucket, key = state_location(ctx, schema, table)
+    ctx.put(bucket, key, json.dumps(state, indent=2).encode(), "application/json")
+
+
+def watermark_text(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value)
 
 
 # ---------------------------------------------------------------------------
@@ -313,38 +401,86 @@ def discover_tables(conn, schema, excluded):
     return [(schema, n) for n in names if n not in skip]
 
 
-def extract_table(conn, s3, schema, table, out_uri, fetchsize):
-    """Dump one table to out_uri. Returns the row count."""
+def extract_table(conn, ctx, schema, table, out_uri, watermark_column=None):
+    """Dump one table to out_uri. Returns (rows, mode)."""
     bucket, prefix = parse_s3_uri(out_uri)
+    state = read_state(ctx, schema, table) if watermark_column else None
+    if state and (state.get("column") != watermark_column or state.get("value") is None):
+        state = None  # new column or nothing read yet: reload
+    delta = state is not None
+    if delta and state.get("type") not in WATERMARK_TYPES:
+        raise ValueError(f"Corrupt watermark state for {schema}.{table}: {state}")
+
+    query = f"SELECT * FROM {qident(schema)}.{qident(table)}"
+    params = ()
+    if delta:
+        # The type comes from our own state file and is checked against
+        # WATERMARK_TYPES above, so it is safe to inline.
+        query += f" WHERE {qident(watermark_column)} > CAST(%s AS {state['type']})"
+        params = (state["value"],)
+    part_prefix = f"{prefix}ingest_date={ctx.ingest_date}/" if watermark_column else prefix
+
     cursor_name = f"pgx_{uuid.uuid4().hex[:12]}"
     cur = conn.cursor()
-    # Server-side cursor: rows arrive in fetchsize chunks, one Parquet part
-    # each. DECLARE goes first: it raises "permission denied" before anything
-    # is deleted, and information_schema hides columns of unreadable tables.
-    cur.execute(
-        f"DECLARE {cursor_name} NO SCROLL CURSOR FOR SELECT * FROM {qident(schema)}.{qident(table)}"
-    )
-    columns = table_columns(conn, schema, table)
-    delete_prefix(s3, bucket, prefix)
-    total, part = 0, 0
+    written, total, high = [], 0, None
     try:
+        # Server-side cursor: rows arrive in fetchsize chunks, one Parquet
+        # part each. DECLARE goes first: it raises "permission denied" before
+        # anything is written, and information_schema hides columns of
+        # unreadable tables.
+        cur.execute(f"DECLARE {cursor_name} NO SCROLL CURSOR FOR {query}", params)
+        columns = table_columns(conn, schema, table)
+        wm_index = None
+        if watermark_column:
+            names = [c[0] for c in columns]
+            if watermark_column not in names:
+                raise LookupError(f"Watermark column {watermark_column} not in {schema}.{table}")
+            wm_index = names.index(watermark_column)
+            wm_type = columns[wm_index][1]
+            if wm_type not in WATERMARK_TYPES:
+                raise TypeError(f"Watermark {watermark_column} has unsupported type {wm_type}")
+
         while True:
-            cur.execute(f"FETCH FORWARD {int(fetchsize)} FROM {cursor_name}")
+            cur.execute(f"FETCH FORWARD {int(ctx.fetchsize)} FROM {cursor_name}")
             rows = cur.fetchall()
-            if not rows and part > 0:
-                break
-            # An empty table still gets one empty part, so the crawler sees
-            # its columns.
-            write_part(s3, to_arrow(rows, columns), bucket, prefix, part)
+            # A full dump of an empty table still gets one empty part, so the
+            # crawler sees its columns; an empty delta writes nothing.
+            if rows or (not written and not delta):
+                part = to_arrow(rows, columns)
+                written.append(write_part(ctx, part, bucket, part_prefix, len(written)))
             total += len(rows)
-            part += 1
-            if len(rows) < fetchsize:
+            if wm_index is not None:
+                values = [r[wm_index] for r in rows if r[wm_index] is not None]
+                if values:
+                    high = max(values) if high is None else max(high, *values)
+            if len(rows) < ctx.fetchsize:
                 break
+    except Exception:
+        # Leave the previous snapshot as it was.
+        delete_keys(ctx.s3, bucket, written)
+        raise
     finally:
-        cur.execute(f"CLOSE {cursor_name}")
         cur.close()
-        conn.commit()
-    return total
+        conn.rollback()  # read-only transaction: ends it and closes the cursor
+
+    if not delta:
+        # Swap: the new parts are complete, now drop everything else.
+        delete_prefix(ctx.s3, bucket, prefix, keep=written)
+    if watermark_column:
+        value = watermark_text(high) if high is not None else (state or {}).get("value")
+        write_state(
+            ctx,
+            schema,
+            table,
+            {
+                "column": watermark_column,
+                "type": wm_type,
+                "value": value,
+                "run_id": ctx.run_id,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    return total, ("delta" if delta else "full")
 
 
 def is_permission_denied(exc):
@@ -356,8 +492,16 @@ def is_permission_denied(exc):
 
 def run(args, conn, s3):
     discover = args.get("discover", "false").lower() == "true"
-    fetchsize = int(args.get("fetchsize", DEFAULT_FETCHSIZE))
     base = args["output_path_base"].rstrip("/") + "/"
+    ctx = Context(
+        s3=s3,
+        fetchsize=int(args.get("fetchsize", DEFAULT_FETCHSIZE)),
+        kms_key_arn=args.get("s3_kms_key_arn") or None,
+        state_path=args.get("state_path") or None,
+    )
+    incremental = {split_table(t): c for t, c in json.loads(args.get("incremental", "{}")).items()}
+    if incremental and not ctx.state_path:
+        raise ValueError("--incremental needs --state_path")
 
     if discover:
         work = discover_tables(
@@ -367,14 +511,19 @@ def run(args, conn, s3):
         work = [split_table(t) for t in json.loads(args.get("tables", "[]"))]
     if not work:
         raise ValueError("Nothing to extract: pass --tables or --discover true")
-    print(f"{len(work)} table(s) to extract into {base}")
+    missing = sorted(f"{s}.{t}" for s, t in set(incremental) - set(work))
+    if missing:
+        print(f"WARNING: incremental tables not extracted this run: {', '.join(missing)}")
+    print(f"{len(work)} table(s) to extract into {base} (run {ctx.run_id})")
 
     failed, denied = [], []
     for schema, table in work:
         out_uri = f"{base}{folder_name(schema, table)}/"
         try:
-            rows = extract_table(conn, s3, schema, table, out_uri, fetchsize)
-            print(f"  OK      {schema}.{table} -> {out_uri} ({rows} rows)")
+            rows, mode = extract_table(
+                conn, ctx, schema, table, out_uri, incremental.get((schema, table))
+            )
+            print(f"  OK      {schema}.{table} -> {out_uri} ({rows} rows, {mode})")
         except Exception as exc:  # keep going; fail at the end
             conn.rollback()
             if discover and is_permission_denied(exc):

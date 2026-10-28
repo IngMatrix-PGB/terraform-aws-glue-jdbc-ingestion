@@ -322,6 +322,56 @@ variable "extract_ssl_mode" {
   }
 }
 
+variable "extract_incremental" {
+  description = "Bundled extractor only: tables appended incrementally, as `{ \"schema.table\" = \"watermark_column\" }`. Each run writes the rows whose watermark is greater than the last one seen to `<table>/ingest_date=YYYY-MM-DD/`; the first run is a full reload. The column must be an integer, numeric, date or timestamp. Delivery is at-least-once and rows are new versions, not upserts: deduplicate by primary key downstream."
+  type        = map(string)
+  default     = {}
+  nullable    = false
+
+  validation {
+    condition     = alltrue([for c in values(var.extract_incremental) : length(trimspace(c)) > 0])
+    error_message = "Every extract_incremental entry needs a watermark column."
+  }
+}
+
+variable "extract_state_s3_path" {
+  description = "Bundled extractor only: where incremental watermarks are stored (`s3://bucket/prefix/`, one JSON object per table). Defaults to `state/` under this job's scripts prefix, outside the crawler target."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.extract_state_s3_path == null || can(regex("^s3://[a-z0-9.-]+/(.+/)?$", var.extract_state_s3_path))
+    error_message = "extract_state_s3_path must be s3://bucket/prefix/ (with a trailing slash)."
+  }
+}
+
+################################################################################
+# Encryption
+################################################################################
+
+variable "kms_key_arn" {
+  description = "Customer managed KMS key for data at rest: the bundled extractor writes Parquet and watermarks with SSE-KMS, and a created security configuration uses it for S3, CloudWatch Logs and job bookmarks. Grants the created role encrypt/decrypt on it. The key policy must also allow `logs.<region>.amazonaws.com` when CloudWatch encryption is on."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.kms_key_arn == null || can(regex("^arn:[a-z-]+:kms:[a-z0-9-]+:[0-9]{12}:key/.+$", var.kms_key_arn))
+    error_message = "kms_key_arn must be a full key ARN (aliases are not accepted by Glue security configurations)."
+  }
+}
+
+variable "create_security_configuration" {
+  description = "Create a Glue security configuration (SSE-KMS for S3 and CloudWatch Logs, CSE-KMS for bookmarks) with `kms_key_arn` and attach it to the job and the crawler. Glue writes to S3 only through Spark sinks: a script writing with boto3 (like the bundled extractor) must set SSE itself."
+  type        = bool
+  default     = false
+}
+
+variable "security_configuration" {
+  description = "Name of an existing Glue security configuration to attach to the job and the crawler instead of creating one."
+  type        = string
+  default     = null
+}
+
 ################################################################################
 # IAM
 ################################################################################
