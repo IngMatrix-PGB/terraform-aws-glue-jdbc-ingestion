@@ -115,7 +115,9 @@ resource "aws_s3_object" "script" {
 ################################################################################
 
 data "aws_subnet" "this" {
-  count = var.create_connection && var.availability_zone == null && var.subnet_id != null ? 1 : 0
+  # Not conditioned on subnet_id: it is required with create_connection, and
+  # a subnet created in the same apply has an unknown ID at plan time.
+  count = var.create_connection && var.availability_zone == null ? 1 : 0
 
   id = var.subnet_id
 }

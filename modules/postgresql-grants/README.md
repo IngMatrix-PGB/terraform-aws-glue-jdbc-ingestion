@@ -30,17 +30,25 @@ fails on the first new table. On RDS the admin is not a superuser, so it must
 be a member of each owner (`GRANT "orders-svc-migrator" TO admin;`) before
 the apply.
 
-The `SELECT` grant on all tables is also a safety net: the provider re-grants
-on drift, so an apply fixes tables that slipped through. In discover mode the
-extractor skips and reports tables without `SELECT` instead of failing.
+On RDS/Aurora (`superuser = false`) the provider grants the admin each table
+owner while it runs `GRANT ... ON ALL TABLES`, so the admin must also be able
+to grant those roles. A single table created by a role the admin is not a
+member of makes the next apply fail with `permission denied to grant role`;
+grant that role to the admin (and add it to `table_owners`). With that in
+place the `SELECT` grant on all tables is a safety net: the provider
+re-grants on drift, so an apply fixes tables that slipped through. In
+discover mode the extractor skips and reports tables without `SELECT`
+instead of failing.
 
 This module never creates roles or passwords; manage the login role with the
 secret that holds its credentials (or RDS IAM authentication).
 
-[`tests/grants/run.sh`](../../tests/grants/run.sh) applies it to a real
-PostgreSQL in CI and checks existing tables, tables created afterwards by a
-listed owner, and a table by an unlisted owner (not covered until the next
-apply).
+[`tests/grants/run.sh`](../../tests/grants/run.sh) applies it in CI to a
+real PostgreSQL 16 as a non-superuser admin with `CREATEROLE`, like the RDS
+master user. It checks that the apply fails before the admin is a member of
+the owner and succeeds after, that existing and later tables are readable,
+and that a table by an unlisted owner is not covered and breaks the next
+apply until its owner is granted.
 
 <!-- BEGIN_TF_DOCS -->
 ## Requirements

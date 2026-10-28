@@ -20,3 +20,9 @@ same PR that touches it; add new ones here.
   `terraform-aws-<name>` layout and `vX.Y.Z` tags. Action: publish it from
   registry.terraform.io with the owner's GitHub account.
 - [x] **No LICENSE** — Apache-2.0.
+- [ ] **No apply in a real AWS account** — CI applies the module to Floci
+  (`tests/floci`), which accepts the Glue API but does not run the script or
+  enforce IAM, KMS key policies or CloudWatch Logs encryption. Pending: one
+  run in a sandbox account to confirm a Python shell job with a security
+  configuration writes encrypted logs, and the grants submodule against
+  RDS. Expected cost: cents (0.0625 DPU for a minute, a `db.t4g.micro`).
