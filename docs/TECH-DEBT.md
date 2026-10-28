@@ -16,9 +16,13 @@ same PR that touches it; add new ones here.
 - [x] **Release automation** — release-please since 0.4.0
   (`.github/workflows/release-please.yml`), with PR titles checked as
   Conventional Commits.
-- [ ] **Not on the Terraform Registry** — the repository already has the
-  `terraform-aws-<name>` layout and `vX.Y.Z` tags. Action: publish it from
-  registry.terraform.io with the owner's GitHub account.
+- [x] **Not on the Terraform Registry** — published as
+  `IngMatrix-PGB/glue-jdbc-ingestion/aws` on 2026-10-28; new tags appear
+  through the GitHub webhook.
+- [ ] **Registry publishing uses the legacy GitHub sign-in** — HashiCorp is
+  deprecating it in favour of HCP Terraform public namespaces. Action: move
+  the module to an HCP Terraform organization before the legacy sign-in is
+  removed.
 - [x] **No LICENSE** — Apache-2.0.
 - [ ] **No apply in a real AWS account** — CI applies the module to Floci
   (`tests/floci`), which accepts the Glue API but does not run the script or

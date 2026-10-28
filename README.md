@@ -3,26 +3,16 @@
 [![CI](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion)](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/releases)
 [![License](https://img.shields.io/github/license/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion)](LICENSE)
+[![Terraform Registry](https://img.shields.io/badge/Terraform_Registry-glue--jdbc--ingestion-7B42BC?logo=terraform)](https://registry.terraform.io/modules/IngMatrix-PGB/glue-jdbc-ingestion/aws/latest)
 
 Terraform module that ingests a JDBC source into S3 as Parquet with AWS Glue:
 one job per source, with its connection, least-privilege role, schedule,
 optional crawler and failure alerts. It ships a tested PostgreSQL extractor
 for Glue Python shell, so a database can be landed with a dozen lines of HCL.
 
-```mermaid
-flowchart LR
-  subgraph VPC
-    DB[(PostgreSQL<br/>reader endpoint)]
-    JOB[Glue Python shell job<br/>pg_extractor.py]
-  end
-  SM[Secrets Manager] -. secret_id .-> JOB
-  TRG[Glue trigger<br/>schedule] --> JOB
-  DB -- "server-side cursor,<br/>TLS, read-only" --> JOB
-  JOB -- "Parquet, SSE-KMS<br/>write-then-delete" --> S3[(S3<br/>raw/&lt;table&gt;/)]
-  JOB -. watermarks .-> ST[(S3 state)]
-  JOB -- SUCCEEDED --> CR[Glue crawler] --> CAT[Glue Data Catalog] --> ATH[Athena / BI]
-  JOB -- "FAILED / TIMEOUT" --> EB[EventBridge] --> SNS[SNS alerts]
-```
+![Architecture: a scheduled Glue Python shell job reads PostgreSQL through a server-side cursor and writes Parquet to S3; a chained crawler updates the Glue Data Catalog for Athena, and EventBridge sends failures to SNS](https://raw.githubusercontent.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/main/docs/images/architecture.png)
+
+<sub>Source: [`docs/images/architecture.mmd`](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/blob/main/docs/images/architecture.mmd) (regenerate with `mermaid-cli`).</sub>
 
 Highlights:
 
@@ -42,8 +32,8 @@ Highlights:
 
 ```hcl
 module "orders_db" {
-  # Pin a release tag; the module is not on the public Registry yet.
-  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion?ref=v0.4.1" # x-release-please-version
+  source  = "IngMatrix-PGB/glue-jdbc-ingestion/aws"
+  version = "0.4.1" # x-release-please-version
 
   name           = "orders-db-prd"
   scripts_bucket = "my-glue-scripts"

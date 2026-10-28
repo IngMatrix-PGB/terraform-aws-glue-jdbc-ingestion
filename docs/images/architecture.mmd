@@ -1,0 +1,12 @@
+flowchart LR
+  subgraph VPC
+    DB[(PostgreSQL<br/>reader endpoint)]
+    JOB[Glue Python shell job<br/>pg_extractor.py]
+  end
+  SM[Secrets Manager] -. secret_id .-> JOB
+  TRG[Glue trigger<br/>schedule] --> JOB
+  DB -- "server-side cursor,<br/>TLS, read-only" --> JOB
+  JOB -- "Parquet, SSE-KMS<br/>write-then-delete" --> S3[(S3<br/>raw/&lt;table&gt;/)]
+  JOB -. watermarks .-> ST[(S3 state)]
+  JOB -- SUCCEEDED --> CR[Glue crawler] --> CAT[Glue Data Catalog] --> ATH[Athena / BI]
+  JOB -- "FAILED / TIMEOUT" --> EB[EventBridge] --> SNS[SNS alerts]
