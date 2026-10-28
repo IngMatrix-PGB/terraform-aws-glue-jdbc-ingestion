@@ -15,7 +15,7 @@ postgres_sources = {
     database   = "billing"
     secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:billing/reader-AbCdEf"
     tables     = ["public.invoices", "public.payments"]
-    schedule   = "cron(5 * * * ? *)"
+    schedule   = "cron(5 * * * ? *)" # hourly: finance reads it intraday
     # payments is append-only and large: read only new rows on each run.
     incremental = { "public.payments" = "created_at" }
   }

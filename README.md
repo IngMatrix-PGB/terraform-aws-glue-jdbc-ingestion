@@ -8,13 +8,14 @@ for Glue Python shell, so a database can be landed with a dozen lines of HCL.
 ```hcl
 module "orders_db" {
   # Pin a release tag; the module is not on the public Registry yet.
-  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion?ref=v0.3.0"
+  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion?ref=v0.4.0"
 
   name           = "orders-db-prd"
   scripts_bucket = "my-glue-scripts"
   output_s3_path = "s3://my-datalake/raw/orders-db/"
 
-  jdbc_url   = "jdbc:postgresql://orders.example.internal:5432/orders"
+  # A reader endpoint, not the writer: dumps are long sequential reads.
+  jdbc_url   = "jdbc:postgresql://orders-ro.example.internal:5432/orders"
   secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:orders/reader-AbCdEf"
 
   subnet_id          = "subnet-0123456789abcdef0"
@@ -24,7 +25,7 @@ module "orders_db" {
   python_modules   = ["pg8000==1.31.5"]   # or extra_py_files without internet
 
   create_trigger   = true
-  trigger_schedule = "cron(0/30 * * * ? *)"
+  trigger_schedule = "cron(0 9 * * ? *)"  # daily; see "Operating the source"
 }
 ```
 
@@ -138,6 +139,36 @@ failure or cost problem.
 
 Known limits are tracked in [docs/TECH-DEBT.md](docs/TECH-DEBT.md).
 
+## Operating the source
+
+Lessons from running these dumps against production databases.
+
+- **Schedule by who reads the data, not by habit.** A full dump every 30
+  minutes is 48 full scans a day. Before going below daily, check that
+  someone reads it that often (Athena query history, BI tool usage). In one
+  production cluster, 30-minute dumps that nobody read were all of the
+  queries slower than 1 s on the reader and kept it scaled up; moving them to
+  daily removed that load. Use `extract_incremental` for big tables that do
+  need fresh data.
+- **Read from a replica that is not the first failover target.** Point
+  `jdbc_url` at a reader (or custom) endpoint. On Aurora, give the instance
+  that serves the dumps a lower failover priority (higher `promotion_tier`)
+  than the one meant to take over writes, so a failover never lands on the
+  instance that is busy with a dump.
+- **Make the load attributable.** The extractor sets `application_name` to
+  the job name, so `pg_stat_activity`, `pg_stat_statements` and Performance
+  Insights show which job is running a slow `FETCH`, even when every job uses
+  the same database user.
+- **Bound each chunk.** `extract_statement_timeout_ms` caps every `FETCH`;
+  `extract_fetchsize` and `extract_fetchsize_overrides` keep memory flat for
+  tables with wide rows (a chunk is held in memory, about 1 GB at 0.0625 DPU).
+- **Grant through Terraform, for the role that creates the tables.** A table
+  added to a job without its `GRANT` fails in production with "permission
+  denied". [`modules/postgresql-grants`](modules/postgresql-grants) grants
+  SELECT on what exists and default privileges for future tables. Default
+  privileges apply per creating role: list the service's migration role in
+  `table_owners`, not the admin user, or they never fire.
+
 ## Network prerequisites
 
 With `create_connection = true` the job runs in your subnet, which needs:
@@ -162,6 +193,8 @@ docker run -d --name pgx -e POSTGRES_PASSWORD=admin -p 55432:5432 postgres:16 \
   -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
 pip install -r tests/python/requirements.txt
 PG_PORT=55432 AWS_DEFAULT_REGION=us-east-1 pytest tests/python
+docker run -d --name pgg -e POSTGRES_PASSWORD=admin -p 55433:5432 postgres:16
+PGHOST=localhost PGPORT=55433 PGUSER=postgres PGPASSWORD=admin tests/grants/run.sh
 ```
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same
@@ -242,10 +275,13 @@ checks plus Checkov. Upgrading from 0.1.x: see [CHANGELOG.md](CHANGELOG.md).
 | extra\_py\_files | S3 URIs of wheels or .py files for `--extra-py-files`. Use it for pg8000 when the subnet has no internet access (see README). | `list(string)` | `[]` | no |
 | extract\_discover | Bundled extractor only: dump every base table of `extract_schema` instead of `extract_tables`. Tables without SELECT are skipped and reported; other failures fail the run after the remaining tables are written. | `bool` | `false` | no |
 | extract\_exclude\_tables | Bundled extractor only: tables to skip in discover mode, in addition to migration bookkeeping tables (`schema_migrations`, `flyway_schema_history`, ...). | `list(string)` | `[]` | no |
+| extract\_fetchsize | Bundled extractor only: rows per chunk and Parquet part. A chunk is held in memory (about 1 GB at 0.0625 DPU), so lower it, or use `max_capacity = 1`, for wide rows. | `number` | `50000` | no |
+| extract\_fetchsize\_overrides | Bundled extractor only: per-table chunk size, as `{ "schema.table" = rows }`, for the few tables with wide rows (large JSON, bytea) so the rest keep the faster default. | `map(number)` | `{}` | no |
 | extract\_incremental | Bundled extractor only: tables appended incrementally, as `{ "schema.table" = "watermark_column" }`. Each run writes the rows whose watermark is greater than the last one seen to `<table>/ingest_date=YYYY-MM-DD/`; the first run is a full reload. The column must be an integer, numeric, date or timestamp. Delivery is at-least-once and rows are new versions, not upserts: deduplicate by primary key downstream. | `map(string)` | `{}` | no |
 | extract\_schema | Bundled extractor only: schema scanned in discover mode. | `string` | `"public"` | no |
 | extract\_ssl\_mode | Bundled extractor only: `require` (TLS without certificate verification, like libpq sslmode=require) or `verify-full` (needs `--ssl_root_cert` in default\_arguments). There is no plaintext fallback. | `string` | `"require"` | no |
 | extract\_state\_s3\_path | Bundled extractor only: where incremental watermarks are stored (`s3://bucket/prefix/`, one JSON object per table). Defaults to `state/` under this job's scripts prefix, outside the crawler target. | `string` | `null` | no |
+| extract\_statement\_timeout\_ms | Bundled extractor only: PostgreSQL `statement_timeout` for the session, applied to each FETCH. Caps how long one chunk can load the source (a table that hits it fails and keeps its previous snapshot). Null keeps the server default. | `number` | `null` | no |
 | extract\_tables | Bundled extractor only: tables to dump, as `schema.table` (schema defaults to public). Ignored when `extract_discover` is true. | `list(string)` | `[]` | no |
 | glue\_version | Glue version. Defaults to `3.0` for pythonshell and `4.0` for glueetl. | `string` | `null` | no |
 | iam\_additional\_read\_s3\_paths | Extra `s3://bucket/prefix/` paths the role may read (e.g. custom libraries, CA bundles). | `list(string)` | `[]` | no |

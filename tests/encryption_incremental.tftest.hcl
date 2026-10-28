@@ -186,3 +186,33 @@ run "incremental_needs_column" {
 
   expect_failures = [var.extract_incremental]
 }
+
+run "source_load_controls" {
+  command = plan
+
+  variables {
+    extract_fetchsize            = 20000
+    extract_fetchsize_overrides  = { "public.orders" = 500 }
+    extract_statement_timeout_ms = 60000
+  }
+
+  assert {
+    condition = alltrue([
+      aws_glue_job.this.default_arguments["--fetchsize"] == "20000",
+      jsondecode(aws_glue_job.this.default_arguments["--fetchsize_overrides"]) == { "public.orders" = 500 },
+      aws_glue_job.this.default_arguments["--statement_timeout_ms"] == "60000",
+      aws_glue_job.this.default_arguments["--application_name"] == "orders-db-test",
+    ])
+    error_message = "Chunk size, per-table overrides, statement timeout and application name must reach the extractor."
+  }
+}
+
+run "statement_timeout_floor" {
+  command = plan
+
+  variables {
+    extract_statement_timeout_ms = 10
+  }
+
+  expect_failures = [var.extract_statement_timeout_ms]
+}

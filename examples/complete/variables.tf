@@ -38,7 +38,8 @@ variable "postgres_sources" {
     secret_arn     = string
     tables         = optional(list(string), [])
     exclude_tables = optional(list(string), [])
-    schedule       = optional(string, "cron(0/30 * * * ? *)")
+    # Daily unless someone reads the data more often (see the module README).
+    schedule = optional(string, "cron(0 9 * * ? *)")
     # { "schema.table" = "watermark_column" }: appended instead of overwritten.
     incremental = optional(map(string), {})
   }))

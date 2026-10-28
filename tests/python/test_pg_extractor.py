@@ -291,6 +291,39 @@ def test_objects_are_kms_encrypted(aws):
         )
 
 
+def test_fetchsize_override_per_table(aws):
+    s3, arn = aws
+    pg_extractor.main(
+        args_for(
+            arn,
+            tables='["orders", "billing.invoices"]',
+            fetchsize_overrides='{"public.orders": 1}',
+        )
+    )
+    assert len(list_keys(s3, "orders")) == 5, "one row per part for the overridden table"
+    assert len(list_keys(s3, "billing_invoices")) == 1
+
+
+def test_session_is_tagged_and_bounded(aws):
+    _, arn = aws
+    args = pg_extractor.parse_args(
+        args_for(
+            arn, tables='["orders"]', application_name="orders-db-prd", statement_timeout_ms="1500"
+        )
+    )
+    conn = pg_extractor.connect(args)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT current_setting('application_name'), current_setting('statement_timeout')"
+        )
+        assert cur.fetchone() == ["orders-db-prd", "1500ms"]
+        with pytest.raises(Exception, match="(?i)statement timeout"):
+            cur.execute("SELECT pg_sleep(3)")
+    finally:
+        conn.close()
+
+
 def test_credentials_never_come_from_arguments(aws):
     _, arn = aws
     args = pg_extractor.parse_args(args_for(arn, tables='["orders"]') + ["--password", "x"])
