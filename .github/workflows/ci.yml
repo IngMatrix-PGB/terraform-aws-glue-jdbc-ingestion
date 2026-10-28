@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terraform:
+    name: terraform ${{ matrix.terraform }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported (required_version) and newest.
+        terraform: ["1.9.8", "latest"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ matrix.terraform }}
+          terraform_wrapper: false
+      - name: fmt
+        run: terraform fmt -check -recursive -diff
+      - name: validate
+        run: |
+          for dir in . examples/minimal examples/complete; do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+            echo "::endgroup::"
+          done
+      - name: test
+        run: terraform test
+
+  tflint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-linters/setup-tflint@v4
+      - run: tflint --init --config "$GITHUB_WORKSPACE/.tflint.hcl"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl" --format compact
+
+  checkov:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          config_file: .checkov.yaml
+
+  docs:
+    name: terraform-docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-docs/gh-actions@v1.3.0
+        with:
+          working-dir: .
+          config-file: .terraform-docs.yml
+          output-method: inject
+          git-push: "false"
+          fail-on-diff: "true"
+
+  extractor:
+    name: extractor (python 3.9 + postgres)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: PostgreSQL with and without TLS
+        run: |
+          docker run -d --name pg-tls -e POSTGRES_PASSWORD=admin -p 55432:5432 postgres:16 \
+            -c ssl=on -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem \
+            -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+          docker run -d --name pg-plain -e POSTGRES_PASSWORD=admin -p 55433:5432 postgres:16
+          for name in pg-tls pg-plain; do
+            for _ in $(seq 1 30); do
+              docker exec "$name" pg_isready -h 127.0.0.1 -U postgres && break
+              sleep 1
+            done
+          done
+      - name: Install (Glue Python shell runtime is 3.9)
+        run: |
+          uv venv -p 3.9 .venv
+          uv pip install -r tests/python/requirements.txt ruff==0.9.10
+      - name: ruff
+        run: |
+          .venv/bin/ruff check .
+          .venv/bin/ruff format --check .
+      - name: pytest
+        env:
+          PG_PORT: "55432"
+          PG_NOSSL_PORT: "55433"
+          AWS_DEFAULT_REGION: us-east-1
+        run: .venv/bin/python -m pytest -v tests/python
