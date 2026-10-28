@@ -1,7 +1,7 @@
 # Glue Python shell 3.9 runtime + pg8000 (same pin as the README).
 pg8000==1.31.5
-pyarrow==14.0.2
-numpy==1.26.4
-boto3==1.35.99
-moto[s3,secretsmanager,kms]==5.0.28
-pytest==8.3.5
+pyarrow==26.0.0
+numpy==2.5.4
+boto3==1.43.118
+moto[s3,secretsmanager,kms]==5.2.4
+pytest==9.1.1
