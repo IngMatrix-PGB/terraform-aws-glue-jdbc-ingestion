@@ -28,12 +28,20 @@ updates:
       terraform:
         patterns: ["*"]
 
+  # The tests mirror the Glue Python shell runtime: Python 3.9
+  # (tests/python/.python-version) and the library versions that
+  # `--library-set analytics` ships, which the job cannot change. Only the
+  # test tooling and pg8000 (installed by the job) move.
   - package-ecosystem: pip
     directory: /tests/python
     schedule:
       interval: weekly
     commit-message:
       prefix: chore(deps)
+    ignore:
+      - dependency-name: pyarrow
+      - dependency-name: numpy
+      - dependency-name: boto3
     groups:
       python:
         patterns: ["*"]
