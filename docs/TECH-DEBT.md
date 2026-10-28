@@ -30,3 +30,10 @@ same PR that touches it; add new ones here.
   run in a sandbox account to confirm a Python shell job with a security
   configuration writes encrypted logs, and the grants submodule against
   RDS. Expected cost: cents (0.0625 DPU for a minute, a `db.t4g.micro`).
+- [ ] **0.2.0 to 0.4.2 may fail to download for a few days** — on
+  2026-10-28 the history was rewritten to remove a work email from the
+  commits, which moved every tag. After "Resync Module" the Registry points
+  at the new SHAs, but CloudFront can serve the old ones to Terraform
+  (gzip requests) until its 7-day cache expires. 0.4.3 was released so
+  `~> 0.4` resolves to a version that was never cached. Action: none; close
+  this item after 2026-11-04.

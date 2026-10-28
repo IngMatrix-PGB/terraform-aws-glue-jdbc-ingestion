@@ -39,3 +39,9 @@ PG_PORT=55432 AWS_DEFAULT_REGION=us-east-1 pytest tests/python
   does not run on it; it only changes versions and the CHANGELOG, and the
   commit it releases already passed CI on `main`.
 - No organization-specific names, account IDs or endpoints: this repository is public.
+- Never move or rewrite a published tag. The Terraform Registry pins each
+  version to the tag's commit SHA and its CDN caches download URLs for up to
+  7 days, so a moved tag breaks `terraform init` for that version even after
+  "Resync Module". Fix forward with a new release instead.
+- Commit as the repository owner's GitHub noreply address
+  (`git config --local user.email`), never a work email.
