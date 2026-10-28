@@ -31,5 +31,9 @@ PG_PORT=55432 AWS_DEFAULT_REGION=us-east-1 pytest tests/python
   properties: only a secret reference.
 - New inputs need a description, a type, a validation when the value space is
   closed, and a test in `tests/`.
-- Behaviour changes go in `CHANGELOG.md`; known gaps in `docs/TECH-DEBT.md`.
+- PR titles are Conventional Commits (`feat:`, `fix:`, `feat!:` for breaking
+  changes, `docs:`, `chore:`): the squash commit takes the title and
+  release-please builds the version and `CHANGELOG.md` from it. Do not edit
+  versions, tags or `CHANGELOG.md` by hand; known gaps go in
+  `docs/TECH-DEBT.md`.
 - No organization-specific names, account IDs or endpoints: this repository is public.
