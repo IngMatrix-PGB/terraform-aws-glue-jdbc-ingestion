@@ -8,7 +8,7 @@ for Glue Python shell, so a database can be landed with a dozen lines of HCL.
 ```hcl
 module "orders_db" {
   # Pin a release tag; the module is not on the public Registry yet.
-  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion?ref=v0.3.0"
+  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion?ref=v0.4.0"
 
   name           = "orders-db-prd"
   scripts_bucket = "my-glue-scripts"
