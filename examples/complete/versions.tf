@@ -5,7 +5,7 @@ terraform {
     aws = {
       source = "hashicorp/aws"
       # Exact pin in the root: `init -upgrade` cannot pull an untested release.
-      version = "6.60.0"
+      version = "6.70.0"
     }
   }
 }
