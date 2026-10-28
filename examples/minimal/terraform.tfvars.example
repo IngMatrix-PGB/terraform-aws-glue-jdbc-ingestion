@@ -1,0 +1,7 @@
+environment        = "dev"
+scripts_bucket     = "example-glue-scripts"
+lake_bucket        = "example-datalake"
+db_host            = "orders.cluster-example.us-east-1.rds.amazonaws.com"
+secret_arn         = "arn:aws:secretsmanager:us-east-1:123456789012:secret:orders/reader-AbCdEf"
+subnet_id          = "subnet-0123456789abcdef0"
+security_group_ids = ["sg-0123456789abcdef0"]
