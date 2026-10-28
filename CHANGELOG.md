@@ -5,6 +5,13 @@ while the major version is 0, minor versions may break the interface.
 From 0.5.0 on, release-please writes the entries from the Conventional Commit
 titles of merged pull requests.
 
+## [0.4.1](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/compare/v0.4.0...v0.4.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* first apply fails when the SNS topic or subnet is created in the same run ([#5](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/issues/5)) ([7ff109f](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/commit/7ff109f4d0827b13f5e704d26353dbfd29bd50c1))
+
 ## [0.4.0] - 2026-10-27
 
 ### Added

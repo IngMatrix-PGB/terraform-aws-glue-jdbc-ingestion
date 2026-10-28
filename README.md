@@ -43,7 +43,7 @@ Highlights:
 ```hcl
 module "orders_db" {
   # Pin a release tag; the module is not on the public Registry yet.
-  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion?ref=v0.4.0" # x-release-please-version
+  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion?ref=v0.4.1" # x-release-please-version
 
   name           = "orders-db-prd"
   scripts_bucket = "my-glue-scripts"
