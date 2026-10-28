@@ -1,14 +1,49 @@
 # terraform-aws-glue-jdbc-ingestion
 
+[![CI](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion)](https://github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion/releases)
+[![License](https://img.shields.io/github/license/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion)](LICENSE)
+
 Terraform module that ingests a JDBC source into S3 as Parquet with AWS Glue:
 one job per source, with its connection, least-privilege role, schedule,
 optional crawler and failure alerts. It ships a tested PostgreSQL extractor
 for Glue Python shell, so a database can be landed with a dozen lines of HCL.
 
+```mermaid
+flowchart LR
+  subgraph VPC
+    DB[(PostgreSQL<br/>reader endpoint)]
+    JOB[Glue Python shell job<br/>pg_extractor.py]
+  end
+  SM[Secrets Manager] -. secret_id .-> JOB
+  TRG[Glue trigger<br/>schedule] --> JOB
+  DB -- "server-side cursor,<br/>TLS, read-only" --> JOB
+  JOB -- "Parquet, SSE-KMS<br/>write-then-delete" --> S3[(S3<br/>raw/&lt;table&gt;/)]
+  JOB -. watermarks .-> ST[(S3 state)]
+  JOB -- SUCCEEDED --> CR[Glue crawler] --> CAT[Glue Data Catalog] --> ATH[Athena / BI]
+  JOB -- "FAILED / TIMEOUT" --> EB[EventBridge] --> SNS[SNS alerts]
+```
+
+Highlights:
+
+- **Cheap by default:** a 0.0625 DPU Python shell job instead of Spark, about
+  a tenth of the smallest Spark job, with FLEX available for Spark sources.
+- **Safe with credentials and data:** secrets only by reference, TLS without
+  plaintext fallback, read-only sessions, least-privilege IAM, optional KMS
+  for objects, logs and bookmarks.
+- **Gentle on the source:** chunked server-side cursors, per-table chunk
+  sizes, statement timeouts, incremental tables by watermark, and an
+  `application_name` per job so every slow query has an owner.
+- **Readers never see a half-written table:** full dumps write the new
+  snapshot before deleting the old one; a failed table keeps its data.
+- **Tested for real:** `terraform test` on the oldest and newest supported
+  Terraform, the extractor against PostgreSQL 16 with TLS, and the grants
+  submodule applied to a live database in CI.
+
 ```hcl
 module "orders_db" {
   # Pin a release tag; the module is not on the public Registry yet.
-  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion?ref=v0.4.0"
+  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion?ref=v0.4.0" # x-release-please-version
 
   name           = "orders-db-prd"
   scripts_bucket = "my-glue-scripts"
@@ -328,3 +363,7 @@ checks plus Checkov. Upgrading from 0.1.x: see [CHANGELOG.md](CHANGELOG.md).
 | state\_s3\_path | Where the bundled extractor stores incremental watermarks (null without `extract_incremental`). |
 | trigger\_name | Schedule trigger name (null when not created). |
 <!-- END_TF_DOCS -->
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

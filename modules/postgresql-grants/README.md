@@ -14,7 +14,7 @@ provider "postgresql" {
 }
 
 module "orders_db_grants" {
-  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion//modules/postgresql-grants?ref=v0.4.0"
+  source = "github.com/IngMatrix-PGB/terraform-aws-glue-jdbc-ingestion//modules/postgresql-grants?ref=v0.4.0" # x-release-please-version
 
   database     = "orders"
   role         = "lake_reader"           # the job secret's username
