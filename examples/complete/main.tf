@@ -133,6 +133,8 @@ module "postgres" {
   crawler_database_name = aws_glue_catalog_database.raw[each.key].name
   crawler_table_level   = 4
 
+  # The topic is created in this apply: its ARN is unknown at plan time.
+  create_alerts        = true
   alerts_sns_topic_arn = aws_sns_topic.alerts.arn
 }
 
@@ -169,5 +171,6 @@ module "mysql" {
   create_trigger   = true
   trigger_schedule = "cron(15 3 * * ? *)"
 
+  create_alerts        = true
   alerts_sns_topic_arn = aws_sns_topic.alerts.arn
 }

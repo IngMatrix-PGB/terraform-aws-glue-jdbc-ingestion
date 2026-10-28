@@ -5,7 +5,10 @@
 ################################################################################
 
 locals {
-  create_alerts = var.alerts_sns_topic_arn != null
+  # count must be known at plan time. A topic created in the same apply has an
+  # unknown ARN, and "unknown != null" is unknown, so such callers set
+  # create_alerts = true explicitly.
+  create_alerts = var.create_alerts != null ? var.create_alerts : var.alerts_sns_topic_arn != null
 }
 
 resource "aws_cloudwatch_event_rule" "job_failed" {

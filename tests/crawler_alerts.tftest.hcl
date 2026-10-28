@@ -122,3 +122,28 @@ run "no_delete_permissions_by_default" {
     error_message = "LOG must not grant glue:DeleteTable."
   }
 }
+
+run "explicit_alerts_need_topic" {
+  command = plan
+
+  variables {
+    create_alerts        = true
+    alerts_sns_topic_arn = null
+  }
+
+  expect_failures = [var.create_alerts]
+}
+
+run "explicit_alerts_off" {
+  command = plan
+
+  variables {
+    create_alerts        = false
+    alerts_sns_topic_arn = "arn:aws:sns:us-east-1:123456789012:alerts"
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_event_rule.job_failed) == 0
+    error_message = "create_alerts = false must win over the topic ARN."
+  }
+}

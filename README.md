@@ -230,7 +230,15 @@ pip install -r tests/python/requirements.txt
 PG_PORT=55432 AWS_DEFAULT_REGION=us-east-1 pytest tests/python
 docker run -d --name pgg -e POSTGRES_PASSWORD=admin -p 55433:5432 postgres:16
 PGHOST=localhost PGPORT=55433 PGUSER=postgres PGPASSWORD=admin tests/grants/run.sh
+docker run -d -p 4566:4566 floci/floci:2.3.0   # local AWS emulator
+tests/floci/run.sh                              # apply, empty plan, inspect, destroy
 ```
+
+`tests/floci` applies the module with every option on, creating all its
+dependencies in the same run, to [Floci](https://floci.io). It catches what a
+mocked plan cannot (values unknown until apply in `count`, API shapes,
+idempotency), but Floci does not run the Glue script or enforce IAM and KMS,
+so it does not replace an apply in a real account.
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same
 checks plus Checkov. Upgrading from 0.1.x: see [CHANGELOG.md](CHANGELOG.md).
@@ -300,6 +308,7 @@ checks plus Checkov. Upgrading from 0.1.x: see [CHANGELOG.md](CHANGELOG.md).
 | crawler\_schema\_change\_delete\_behavior | LOG (default: never drop tables that disappear), DEPRECATE\_IN\_DATABASE or DELETE\_FROM\_DATABASE. | `string` | `"LOG"` | no |
 | crawler\_schema\_change\_update\_behavior | UPDATE\_IN\_DATABASE (update tables in place) or LOG. | `string` | `"UPDATE_IN_DATABASE"` | no |
 | crawler\_table\_level | Folder depth where the crawler creates tables (bucket = 1). Set it to the depth of `<prefix>/<table>/` so a prefix with a single table is not collapsed into one table with `partition_0`. Null keeps Glue's grouping. | `number` | `null` | no |
+| create\_alerts | Create the EventBridge alert rules. Null infers it from `alerts_sns_topic_arn`, which only works when the ARN is known at plan time: set true when the topic is created in the same apply. | `bool` | `null` | no |
 | create\_connection | Create a JDBC Glue connection. It only provides the network wiring (ENIs in your VPC) and references the secret through `SECRET_ID`. Set false for sources reachable without a VPC. | `bool` | `true` | no |
 | create\_crawler | Create a crawler that catalogs the output. Only needed when the schema changes: the job overwrites the data and Athena reads it right away. | `bool` | `false` | no |
 | create\_iam\_role | Create a least-privilege role for the job and crawler. Set false and pass `iam_role_arn` to bring your own. | `bool` | `true` | no |
