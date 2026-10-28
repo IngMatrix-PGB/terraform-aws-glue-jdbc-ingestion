@@ -22,8 +22,8 @@ jobs:
         # Oldest supported (required_version) and newest.
         terraform: ["1.9.8", "latest"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ matrix.terraform }}
           terraform_wrapper: false
@@ -43,8 +43,8 @@ jobs:
   tflint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: terraform-linters/setup-tflint@v4
+      - uses: actions/checkout@v7
+      - uses: terraform-linters/setup-tflint@v6
       - run: tflint --init --config "$GITHUB_WORKSPACE/.tflint.hcl"
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -53,7 +53,7 @@ jobs:
   checkov:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: bridgecrewio/checkov-action@v12
         with:
           directory: .
@@ -63,15 +63,15 @@ jobs:
     name: terraform-docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: terraform-docs/gh-actions@v1.3.0
+      - uses: actions/checkout@v7
+      - uses: terraform-docs/gh-actions@v1.4.1
         with:
           working-dir: .
           config-file: .terraform-docs.yml
           output-method: inject
           git-push: "false"
           fail-on-diff: "true"
-      - uses: terraform-docs/gh-actions@v1.3.0
+      - uses: terraform-docs/gh-actions@v1.4.1
         with:
           working-dir: modules/postgresql-grants
           config-file: ${{ github.workspace }}/.terraform-docs.yml
@@ -83,8 +83,8 @@ jobs:
     name: extractor (python 3.9 + postgres)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - name: PostgreSQL with and without TLS
         run: |
           docker run -d --name pg-tls -e POSTGRES_PASSWORD=admin -p 55432:5432 postgres:16 \
@@ -116,8 +116,8 @@ jobs:
     name: postgresql-grants (real apply)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_wrapper: false
       - name: PostgreSQL
@@ -144,8 +144,8 @@ jobs:
         ports:
           - 4566:4566
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_wrapper: false
       - name: wait for Floci
